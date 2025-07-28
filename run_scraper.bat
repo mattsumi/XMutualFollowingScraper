@@ -1,7 +1,8 @@
 @echo off
 echo ================================================
 echo   X/Twitter Mutual Following Scraper
-echo   (Profile picture downloading disabled)
+echo   Fast mutual follower detection with optional
+echo   profile picture downloading
 echo ================================================
 echo.
 
@@ -16,23 +17,23 @@ if %ERRORLEVEL% neq 0 (
         pause
         exit /b 1
     )
-    echo ✅ Python packages installed successfully
+    echo [SUCCESS] Python packages installed successfully
 ) else (
-    echo ✅ Python packages already installed
+    echo [SUCCESS] Python packages already installed
 )
 echo.
 
 echo [2/3] Checking Firefox browser...
 where firefox >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo ⚠️  Mozilla Firefox not found in PATH
-    echo 💡 Please make sure Mozilla Firefox is installed
-    echo    Download from: https://www.mozilla.org/firefox/
+    echo WARNING: Mozilla Firefox not found in PATH
+    echo Please make sure Mozilla Firefox is installed
+    echo Download from: https://www.mozilla.org/firefox/
     echo.
     echo Continue anyway? Firefox may still work...
     pause
 ) else (
-    echo ✅ Mozilla Firefox detected
+    echo [SUCCESS] Mozilla Firefox detected
 )
 echo.
 
@@ -46,4 +47,5 @@ python scraper.py
 echo.
 echo ================================================
 echo Scraper finished!
+echo ================================================
 pause
