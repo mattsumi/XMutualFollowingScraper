@@ -308,7 +308,7 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
             end_indicators = [
                 "you've reached the end",
                 "no more to show",
-                "that's all",
+                "no more results",
                 "end of list",
                 "nothing more to load",
                 "end of timeline"
