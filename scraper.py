@@ -16,8 +16,8 @@ import re
 # --- CONFIG ---
 USERNAME = input("Enter your X/Twitter username (without @): ").strip()
 DOWNLOAD_DIR = 'profile_pics'
-SCROLL_PAUSE_TIME = 3      # Time to wait between scrolls (increased for rate limiting)
-PROFILE_CHECK_DELAY = 10    # Delay between profile visits to avoid 429 errors
+SCROLL_PAUSE_TIME = 2      # Time to wait between scrolls (optimized for speed)
+PROFILE_CHECK_DELAY = 5    # Delay between profile visits to avoid 429 errors (reduced for better speed)
 JSON_OUTPUT_FILE = 'mutual_following.json'  # JSON output file
 
 # --- SETUP ---
@@ -679,51 +679,58 @@ def main():
                 print("❌ Still no following data after retry. Exiting.")
                 return
         
-        print('\n2. Downloading profile pictures and checking mutual following...')
+        print('\n2. Checking mutual following (profile picture downloading disabled)...')
         
         # Get your profile page to check who follows you back
         your_profile_url = f'https://x.com/{USERNAME}'
         driver.get(your_profile_url)
         time.sleep(PROFILE_CHECK_DELAY)
         
-        # Now we'll check each person you follow - download pic first, then check if they follow back
+        # Now we'll check each person you follow - check if they follow back (no pic download)
         mutual_following_data = []
         
         for idx, user_data in enumerate(following_data):
             username = user_data['username']
             print(f"\n🔍 Processing @{username}... ({idx + 1}/{len(following_data)})")
             
-            # STEP 1: Visit their profile and download profile picture FIRST
+            # STEP 1: Visit their profile (profile picture downloading is DISABLED)
             profile_url = f'https://x.com/{username}'
             print(f"     📍 Navigating to {profile_url}")
             driver.get(profile_url)
             time.sleep(PROFILE_CHECK_DELAY)  # Longer delay to avoid rate limiting
             
-            # Download profile picture immediately
-            pic_url = user_data.get('profile_pic_url')
-            if not pic_url:
-                print(f'     🔍 No pre-extracted profile pic, fetching from profile page...')
-                pic_url = get_profile_pic(driver, username)
-            else:
-                # Validate the pre-extracted URL
-                if not is_valid_twitter_profile_url(pic_url, verbose=False):
-                    print(f'     ⚠️  Pre-extracted URL is invalid, fetching from profile page...')
-                    pic_url = get_profile_pic(driver, username)
+            # PROFILE PICTURE DOWNLOADING IS DISABLED FOR NOW
+            # # Download profile picture immediately
+            # pic_url = user_data.get('profile_pic_url')
+            # if not pic_url:
+            #     print(f'     🔍 No pre-extracted profile pic, fetching from profile page...')
+            #     pic_url = get_profile_pic(driver, username)
+            # else:
+            #     # Validate the pre-extracted URL
+            #     if not is_valid_twitter_profile_url(pic_url, verbose=False):
+            #         print(f'     ⚠️  Pre-extracted URL is invalid, fetching from profile page...')
+            #         pic_url = get_profile_pic(driver, username)
+            # 
+            # # Download the profile picture now
+            # pic_downloaded = False
+            # if pic_url:
+            #     # Create filename with temporary numbering (we'll rename later based on mutual status)
+            #     temp_filename = f'temp_{idx:03d}_@{username}.jpg'
+            #     temp_filepath = os.path.join(DOWNLOAD_DIR, temp_filename)
+            #     
+            #     pic_downloaded = download_image(pic_url, temp_filepath, username)
+            #     if pic_downloaded:
+            #         print(f'     ✅ Profile picture downloaded to {temp_filename}')
+            #     else:
+            #         print(f'     ❌ Failed to download profile picture')
+            # else:
+            #     print(f'     ❌ Could not find profile picture URL')
             
-            # Download the profile picture now
+            # Profile picture downloading is disabled
+            pic_url = None
             pic_downloaded = False
-            if pic_url:
-                # Create filename with temporary numbering (we'll rename later based on mutual status)
-                temp_filename = f'temp_{idx:03d}_@{username}.jpg'
-                temp_filepath = os.path.join(DOWNLOAD_DIR, temp_filename)
-                
-                pic_downloaded = download_image(pic_url, temp_filepath, username)
-                if pic_downloaded:
-                    print(f'     ✅ Profile picture downloaded to {temp_filename}')
-                else:
-                    print(f'     ❌ Failed to download profile picture')
-            else:
-                print(f'     ❌ Could not find profile picture URL')
+            temp_filename = None
+            print(f'     ℹ️  Profile picture downloading is disabled')
             
             # STEP 2: Now check if they follow you back (we're already on their profile)
             print(f"     🔍 Checking if @{username} follows you back...")
@@ -752,13 +759,13 @@ def main():
                     })
                 else:
                     print(f"     ➖ @{username} doesn't follow you back")
-                    # If not mutual, we can delete the temp file to save space
-                    if pic_downloaded:
-                        try:
-                            os.remove(temp_filepath)
-                            print(f"     🗑️  Removed non-mutual profile pic: {temp_filename}")
-                        except:
-                            pass
+                    # Profile picture downloading is disabled, so no files to clean up
+                    # if pic_downloaded:
+                    #     try:
+                    #         os.remove(temp_filepath)
+                    #         print(f"     🗑️  Removed non-mutual profile pic: {temp_filename}")
+                    #     except:
+                    #         pass
                     
             except Exception as e:
                 print(f"     ⚠️  Error checking @{username}: {e}")
@@ -781,29 +788,35 @@ def main():
         # Create a list to store results with timestamps
         results = []
         
-        # Now rename the temp files to proper numbered filenames and create results
+        # Create results (no file renaming since profile picture downloading is disabled)
         for idx, user_data in enumerate(mutual_following_data, 1):
             username = user_data['username']
             print(f'{idx:3d}. @{username} (you followed them #{user_data["position"] + 1})')
             
-            pic_downloaded = user_data.get('pic_downloaded', False)
-            temp_filename = user_data.get('temp_filename')
+            # Profile picture downloading is disabled
+            pic_downloaded = False
+            temp_filename = None
+            new_filename = None
+            print(f'     ℹ️  Profile picture downloading is disabled')
             
-            if pic_downloaded and temp_filename:
-                # Rename temp file to proper numbered filename
-                old_filepath = os.path.join(DOWNLOAD_DIR, temp_filename)
-                new_filename = f'{idx:03d}_@{username}.jpg'
-                new_filepath = os.path.join(DOWNLOAD_DIR, new_filename)
-                
-                try:
-                    os.rename(old_filepath, new_filepath)
-                    print(f'     ✅ Profile picture saved as {new_filename}')
-                except Exception as e:
-                    print(f'     ⚠️  Error renaming file: {e}')
-                    new_filename = temp_filename  # Keep temp name if rename fails
-            else:
-                new_filename = None
-                print(f'     ❌ No profile picture available')
+            # # pic_downloaded = user_data.get('pic_downloaded', False)
+            # # temp_filename = user_data.get('temp_filename')
+            # # 
+            # # if pic_downloaded and temp_filename:
+            # #     # Rename temp file to proper numbered filename
+            # #     old_filepath = os.path.join(DOWNLOAD_DIR, temp_filename)
+            # #     new_filename = f'{idx:03d}_@{username}.jpg'
+            # #     new_filepath = os.path.join(DOWNLOAD_DIR, new_filename)
+            # #     
+            # #     try:
+            # #         os.rename(old_filepath, new_filepath)
+            # #         print(f'     ✅ Profile picture saved as {new_filename}')
+            # #     except Exception as e:
+            # #         print(f'     ⚠️  Error renaming file: {e}')
+            # #         new_filename = temp_filename  # Keep temp name if rename fails
+            # # else:
+            # #     new_filename = None
+            # #     print(f'     ❌ No profile picture available')
             
             # Store result
             results.append({
@@ -821,9 +834,9 @@ def main():
         list_type = "mutual following (people who follow you back)"
         print(f'✅ Total {list_type}: {len(mutual_following_data)}')
         successful_downloads = sum(1 for r in results if r['pic_downloaded'])
-        print(f'✅ Profile pictures downloaded: {successful_downloads}/{len(mutual_following_data)}')
-        print(f'📁 Images saved to: {DOWNLOAD_DIR}/')
-        print(f'📝 Filename format: 001_@username.jpg, 002_@username.jpg, etc.')
+        print(f'ℹ️  Profile picture downloading: DISABLED')
+        print(f'📁 No images downloaded (feature disabled)')
+        print(f'📝 Only mutual following data collected')
         print(f'📅 Ordered from: oldest person you followed (#1) to newest person you followed (#{len(mutual_following_data)})')
         print(f'💡 Note: These are people YOU follow who also follow YOU back (mutual following)')
         

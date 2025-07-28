@@ -1,6 +1,7 @@
 @echo off
 echo ================================================
-echo   X/Twitter Mutual Followers Scraper
+echo   X/Twitter Mutual Following Scraper
+echo   (Profile picture downloading disabled)
 echo ================================================
 echo.
 

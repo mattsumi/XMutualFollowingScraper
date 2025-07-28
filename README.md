@@ -2,13 +2,6 @@
 
 A Python script that logs into X (formerly Twitter), retrieves your following and followers lists, and identifies mutual followers. It automatically downloads their profile pictures and sorts them by the date you followed each account.
 
-## Authentication Required
-To access your followers and following lists, you need to log in to X. Here’s how it works:
-1. The script launches Firefox and opens the X login page.
-2. You complete the login process (including any 2FA).
-3. Press ENTER in the terminal to confirm you’re signed in.
-4. The scraper resumes and begins collecting data.
-
 ## Features
 - **Interactive Login**: Guides you through the X/Twitter login process
 - **Smart Scrolling**: Automatically scrolls through all followers/following pages
@@ -71,12 +64,6 @@ JSON_OUTPUT_FILE = 'mutual_following.json'  # Output JSON file path
 - **GeckoDriver** - automatically downloaded by WebDriverManager
 - **Mozilla Firefox browser** - you need to install this manually
 
-## One-Time Setup
-The script will automatically:
-1. Install required Python packages
-2. Download the correct GeckoDriver version for your Firefox
-3. Handle all WebDriver management
-
 You only need to install **Mozilla Firefox browser** manually if you don't have it.
 
 ## Troubleshooting
@@ -85,6 +72,13 @@ You only need to install **Mozilla Firefox browser** manually if you don't have 
 - Make sure you're **fully logged in** to X/Twitter
 - Check if the **target account is private**
 - Verify the **username is correct** (no @ symbol needed)
+
+## Authentication Required
+To access your followers and following lists, you need to log in to X. Here’s how it works:
+1. The script launches Firefox and opens the X login page.
+2. You complete the login process (including any 2FA).
+3. Press ENTER in the terminal to confirm you’re signed in.
+4. The scraper resumes and begins collecting data.
 
 ### "Login verification failed"
 - Complete the **entire login process** including any 2FA
