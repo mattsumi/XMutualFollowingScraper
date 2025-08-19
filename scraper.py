@@ -12,6 +12,10 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.firefox import GeckoDriverManager
 import time
 import re
+import logging
+from logging.handlers import RotatingFileHandler
+import sys
+import traceback
 
 # --- CONFIG ---
 USERNAME = input("Enter your X/Twitter username (without @): ").strip()
@@ -23,6 +27,30 @@ PROFILE_CHECK_DELAY = 5    # Delay between profile visits to avoid 429 errors (r
 JSON_OUTPUT_FILE = 'mutual_following.json'  # JSON output file
 
 # --- SETUP ---
+# Configure file-based logging for error reporting
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scraper.log')
+
+# Create logger
+logger = logging.getLogger('scraper')
+logger.setLevel(logging.DEBUG)
+
+# Rotating file handler
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
+file_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
+
+# Also log uncaught exceptions to the file
+def _handle_uncaught_exception(exc_type, exc_value, exc_tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        # Let default handler print KeyboardInterrupt to console
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    logger.critical('Uncaught exception', exc_info=(exc_type, exc_value, exc_tb))
+
+sys.excepthook = _handle_uncaught_exception
+
+# Ensure download directory exists
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 def setup_driver():
@@ -79,7 +107,12 @@ def setup_driver():
         return driver
         
     except Exception as e:
-        print(f"Failed to start Firefox WebDriver: {e}")
+        # Log the exception to file as well as printing to console
+        try:
+            logger.exception(f"Failed to start Firefox WebDriver: {e}")
+        except Exception:
+            print(f"Failed to start Firefox WebDriver: {e}")
+            traceback.print_exc()
         print("\nTROUBLESHOOTING:")
         print("1. Make sure Mozilla Firefox browser is installed")
         print("2. Try updating Firefox to the latest version")
@@ -96,27 +129,19 @@ def login_to_twitter(driver):
     print("Please log in manually and then the script will automatically continue.")
     print("=" * 50)
     
-    # Navigate to login page
     driver.get('https://x.com/login')
     
-    # Wait for user to log in automatically by checking for login success
     print("\nPlease log in to X/Twitter in the browser window...")
     print("Script will automatically continue once login is detected...")
     
-    # Wait for login to complete by checking for logged-in elements
-    max_wait_time = 300  # 5 minutes maximum wait
-    check_interval = 10   # Check every 10 seconds (less frequent to avoid triggering security)
-    
+    max_wait_time = 300  
+    check_interval = 10   
     for attempt in range(0, max_wait_time, check_interval):
         try:
-            # Check current page for login indicators WITHOUT navigating away
             current_url = driver.current_url.lower()
             print(f"Current URL: {current_url}")
-            
-            # If we're no longer on login page, check if we're logged in
             if 'login' not in current_url:
                 try:
-                    # Check for logged-in elements on current page
                     logged_in_elements = [
                         '[data-testid="SideNav_AccountSwitcher_Button"]',
                         '[data-testid="AppTabBar_Profile_Link"]', 
@@ -137,12 +162,10 @@ def login_to_twitter(driver):
                         except TimeoutException:
                             continue
                     
-                    # If no elements found but not on login page, try going to home once
                     print("Not on login page but no login elements found. Trying home page...")
                     driver.get('https://x.com/home')
                     time.sleep(5)
                     
-                    # Check again after going to home
                     for selector in logged_in_elements:
                         try:
                             element = WebDriverWait(driver, 3).until(
@@ -157,7 +180,6 @@ def login_to_twitter(driver):
                 except Exception as e:
                     print(f"Error checking login elements: {e}")
             
-            # Still on login page or not logged in, wait and check again
             if attempt < max_wait_time - check_interval:
                 print(f"Still waiting for login... ({attempt + check_interval}s elapsed)")
                 time.sleep(check_interval)
@@ -184,27 +206,21 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
         scroll_count += 1
         print(f"Scroll #{scroll_count} - Current users: {len(users_data)}")
         
-        # Scroll down
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(SCROLL_PAUSE_TIME)
         
-        # Collect users from current view with multiple detection strategies
         old_count = len(users_data)
         try:
-            # Strategy 1: Look for UserCell elements (most reliable)
             user_cells = driver.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
             print(f"Found {len(user_cells)} UserCell elements on current view")
             
             for cell in user_cells:
                 try:
-                    # Check if this cell contains "Follows you" indicator (for mutual detection)
                     follows_you_elements = cell.find_elements(By.XPATH, ".//*[contains(text(), 'Follows you')]")
                     is_mutual = len(follows_you_elements) > 0
                     
-                    # Also check for other status indicators
                     has_following = len(cell.find_elements(By.XPATH, ".//*[contains(text(), 'Following') or contains(text(), 'Follows you')]")) > 0
                     
-                    # Find username link - try multiple approaches
                     username_links = cell.find_elements(By.CSS_SELECTOR, 'a[href^="/"]')
                     for username_link in username_links:
                         href = username_link.get_attribute('href')
@@ -213,12 +229,9 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
                             username = extract_username_from_url(href)
                             
                             if username and is_valid_username(username):
-                                # Check if we already have this user
                                 if not any(user['username'] == username for user in users_data):
-                                    # Try to find follow date or any timestamp info
                                     follow_date = extract_follow_date(cell, len(users_data))
                                     
-                                    # Try to extract profile picture URL from the cell (non-verbose for speed)
                                     profile_pic_url = extract_profile_pic_from_cell(cell, verbose=False)
                                     
                                     users_data.append({
@@ -232,7 +245,7 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
                                     pic_status = "[PIC]" if profile_pic_url else "[NO PIC]"
                                     mutual_status = "[MUTUAL]" if is_mutual else "[ONE-WAY]"
                                     print(f"Added user: {username} (position {len(users_data)}) - {mutual_status} - {pic_status}")
-                                    break  # Found a valid user in this cell, move to next cell
+                                    break
                                 
                 except Exception as e:
                     continue
@@ -241,7 +254,6 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
             if len(users_data) == old_count:
                 print("UserCell method found no new users, trying fallback methods...")
                 
-                # Try alternative selectors
                 selectors = [
                     '[data-testid="cellInnerDiv"] a[href^="/"]',
                     'div[dir="ltr"] a[href^="/"]',
@@ -261,11 +273,9 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
                                 username = extract_username_from_url(href)
                                 if username and is_valid_username(username):
                                     if not any(user['username'] == username for user in users_data):
-                                        # Try to find the parent cell for profile pic extraction and mutual status
                                         try:
                                             parent_cell = link.find_element(By.XPATH, "./ancestor::*[@data-testid='UserCell']")
                                             profile_pic_url = extract_profile_pic_from_cell(parent_cell, verbose=False)
-                                            # Check for mutual status in parent cell
                                             follows_you_elements = parent_cell.find_elements(By.XPATH, ".//*[contains(text(), 'Follows you')]")
                                             is_mutual = len(follows_you_elements) > 0
                                         except:
@@ -305,7 +315,6 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
             
         print(f"Collected {len(users_data)} users so far (scroll #{scroll_count})")
         
-        # Check if we've reached the bottom by comparing page height
         new_height = driver.execute_script("return document.body.scrollHeight")
         if new_height == last_height:
             stagnant_height_count += 1
@@ -316,7 +325,6 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
             stagnant_height_count = 0
         last_height = new_height
         
-        # Additional check: try to detect "end of list" indicators
         try:
             page_source = driver.page_source.lower()
             end_indicators = [
@@ -663,18 +671,18 @@ def download_image(url, filepath, username):
         return False
 
 def main():
-    print("=== X/Twitter Mutual Following Scraper ===")
-    print("(Finds people you follow who also follow you back)")
-    print(f"Target username: {USERNAME}")
-    print(f"Download directory: {DOWNLOAD_DIR}")
-    print("=" * 50)
+    logger.info("=== X/Twitter Mutual Following Scraper ===")
+    logger.info("(Finds people you follow who also follow you back)")
+    logger.info(f"Target username: {USERNAME}")
+    logger.info(f"Download directory: {DOWNLOAD_DIR}")
+    logger.info("%s", "=" * 50)
     
     driver = setup_driver()
     
     try:
         # Step 1: Login to Twitter
         if not login_to_twitter(driver):
-            print("Login failed. Cannot proceed without authentication.")
+            logger.error("Login failed. Cannot proceed without authentication.")
             return
         
         print('\n1. Fetching following (people you follow)...')
@@ -697,15 +705,13 @@ def main():
             print('\nSkipping mutual check as requested.')
             print(f'Found {len(following_data)} people you follow (no mutual filtering)')
             
-            # Create simplified results (numbered from newest to oldest)
+            # Create simplified results 
             simplified_results = []
             for idx, user_data in enumerate(following_data, 1):
                 username = user_data['username']
-                # Reverse the numbering: newest person you followed gets #1
-                reversed_number = len(following_data) - idx + 1
-                print(f'{reversed_number:3d}. @{username} (position {user_data["position"] + 1})')
+                print(f'{idx:3d}. @{username} (position {user_data["position"] + 1})')
                 
-                simplified_results.append(f"{reversed_number}. @{username}")
+                simplified_results.append(f"{idx}. @{username}")
             
             # Save results to JSON file with simplified format
             json_data = {
@@ -720,9 +726,9 @@ def main():
             try:
                 with open(JSON_OUTPUT_FILE, 'w', encoding='utf-8') as f:
                     json.dump(json_data, f, indent=2, ensure_ascii=False)
-                print(f'\nResults saved to: {JSON_OUTPUT_FILE}')
+                logger.info('\nResults saved to: %s', JSON_OUTPUT_FILE)
             except Exception as e:
-                print(f'Failed to save JSON file: {e}')
+                logger.exception('Failed to save JSON file: %s', e)
             
             print(f'\n=== SUMMARY ===')
             print(f'Total people you follow: {len(following_data)}')
@@ -781,18 +787,16 @@ def main():
         mutual_following_data.sort(key=lambda x: x['position'], reverse=True)
         
         list_type = "mutual following (people who follow you back)"
-        print(f'\nFound {len(mutual_following_data)} {list_type} (numbered from newest to oldest):')
+        print(f'\nFound {len(mutual_following_data)} {list_type} (ordered by when you followed them, oldest to newest):')
         print("-" * 60)
         
         # Create a list to store simplified results
         simplified_results = []
         
-        # Create simplified results (numbered from newest to oldest)
+        # Create simplified results (numbered from oldest to newest)
         for idx, user_data in enumerate(mutual_following_data, 1):
             username = user_data['username']
-            # Reverse the numbering: newest mutual gets #1
-            reversed_number = len(mutual_following_data) - idx + 1
-            print(f'{reversed_number:3d}. @{username} (you followed them #{user_data["position"] + 1})')
+            print(f'{idx:3d}. @{username} (you followed them #{user_data["position"] + 1})')
             
             # Get file info
             pic_downloaded = user_data.get('pic_downloaded', False)
@@ -805,8 +809,8 @@ def main():
             else:
                 print(f'     Profile picture downloading was disabled')
             
-            # Store simplified result with reversed numbering
-            simplified_results.append(f"{reversed_number}. @{username} [Mutual]")
+            # Store simplified result
+            simplified_results.append(f"{idx}. @{username} [Mutual]")
         
         print(f'\n=== SUMMARY ===')
         list_type = "mutual following (people who follow you back)"
@@ -822,7 +826,7 @@ def main():
             print(f'No images downloaded (feature disabled)')
             print(f'Only mutual following data collected')
         
-        print(f'Ordered from: newest person you followed (#1) to oldest person you followed (#{len(mutual_following_data)})')
+        print(f'Ordered from: oldest person you followed (#1) to newest person you followed (#{len(mutual_following_data)})')
         print(f'Note: These are people YOU follow who also follow YOU back (mutual following)')
         
         # Save results to JSON file with simplified format
@@ -834,24 +838,24 @@ def main():
             'mutual_check_performed': True,
             'results': simplified_results
         }
-        
         try:
             with open(JSON_OUTPUT_FILE, 'w', encoding='utf-8') as f:
                 json.dump(json_data, f, indent=2, ensure_ascii=False)
-            print(f'Results saved to: {JSON_OUTPUT_FILE}')
+            logger.info('Results saved to: %s', JSON_OUTPUT_FILE)
         except Exception as e:
-            print(f'Failed to save JSON file: {e}')
+            logger.exception('Failed to save JSON file: %s', e)
         
     except KeyboardInterrupt:
-        print("\nProcess interrupted by user.")
+        logger.info('Process interrupted by user (KeyboardInterrupt)')
     except Exception as e:
-        print(f"An error occurred: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception('An unhandled exception occurred: %s', e)
     finally:
-        print("\nClosing browser...")
-        driver.quit()
-        print("Done!")
+        logger.info('Closing browser...')
+        try:
+            driver.quit()
+        except Exception:
+            logger.exception('Error while quitting driver')
+        logger.info('Done!')
 
 if __name__ == '__main__':
     main()
