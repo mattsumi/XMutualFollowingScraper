@@ -1,4 +1,6 @@
 @echo off
+setlocal enabledelayedexpansion
+
 echo ================================================
 echo   X/Twitter Mutual Followers Scraper
 echo ================================================
@@ -15,23 +17,40 @@ if %ERRORLEVEL% neq 0 (
         pause
         exit /b 1
     )
-    echo ✅ Python packages installed successfully
+    echo [+] Python packages installed successfully
 ) else (
-    echo ✅ Python packages already installed
+    echo [+] Python packages already installed
 )
 echo.
 
 echo [2/3] Checking Firefox browser...
-where firefox >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo ⚠️  Mozilla Firefox not found in PATH
-    echo 💡 Please make sure Mozilla Firefox is installed
-    echo    Download from: https://www.mozilla.org/firefox/
-    echo.
-    echo Continue anyway? Firefox may still work...
-    pause
+set FIREFOX_FOUND=0
+
+REM Check common Firefox installation locations
+set FIREFOX_LOCATIONS=^
+"C:\Program Files\Mozilla Firefox\firefox.exe"
+
+for %%f in (%FIREFOX_LOCATIONS%) do (
+    if exist %%f (
+        set FIREFOX_FOUND=1
+        echo [+] Firefox detected: %%f
+        goto :firefox_done
+    )
+)
+
+echo [-] Firefox not found.
+
+:firefox_done
+if %FIREFOX_FOUND% equ 1 (
+    echo [+] Firefox detected and ready for use
 ) else (
-    echo ✅ Mozilla Firefox detected
+    echo [!] Firefox not detected by automatic checks. 
+    echo     But we'll continue anyway since GeckoDriver can sometimes find Firefox automatically.
+    echo     If the script fails, please install Firefox from:
+    echo     https://www.mozilla.org/firefox/
+    echo.
+    echo     Press any key to continue...
+    pause > nul
 )
 echo.
 
