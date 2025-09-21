@@ -261,25 +261,25 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
             print(f"[!] Error trying to click 'Show more' button: {e}")
             
         # Additional check: try to detect "end of list" indicators
-        try:
-            page_source = driver.page_source.lower()
-            end_indicators = [
-                "you've reached the end",
-                "no more to show",
-                "that's all",
-                "end of list",
-                "nothing more to load",
-                "end of timeline"
-            ]
-            
-            for indicator in end_indicators:
-                if indicator in page_source:
-                    print(f"[-] Detected end-of-list indicator: '{indicator}'")
-                    print(f"[+] Completed scroll with {scroll_count} total scrolls")
-                    return users_data
-                    
-        except Exception:
-            pass
+        # try:
+        #     page_source = driver.page_source.lower()
+        #     end_indicators = [
+        #         "you've reached the end",
+        #         "no more to show",
+        #         "that's all",
+        #         "end of list",
+        #         "nothing more to load",
+        #         "end of timeline"
+        #     ]
+        #     
+        #     for indicator in end_indicators:
+        #         if indicator in page_source:
+        #             print(f"[-] Detected end-of-list indicator: '{indicator}'")
+        #             print(f"[+] Completed scroll with {scroll_count} total scrolls")
+        #             return users_data
+        #             
+        # except Exception:
+        #     pass
         
         # Safety valve: if we've scrolled excessively (100+ times), something might be wrong
         if scroll_count > 100:
@@ -593,7 +593,7 @@ def get_profile_pic(driver, username):
                 high_quality_url = re.sub(r'_bigger', '', high_quality_url)
                 high_quality_url = re.sub(r'_mini', '', high_quality_url)
                 
-                print(f'     🎯 High-quality URL: {high_quality_url}')
+                print(f'     [-] High-quality URL: {high_quality_url}')
                 return high_quality_url
         else:
             # Fallback: try to find any profile image in the page source
@@ -609,7 +609,7 @@ def get_profile_pic(driver, username):
                 high_quality_url = re.sub(r'_bigger', '', high_quality_url)
                 high_quality_url = re.sub(r'_mini', '', high_quality_url)
                 
-                print(f'     🎯 High-quality URL (fallback): {high_quality_url}')
+                print(f'     [-] High-quality URL (fallback): {high_quality_url}')
                 return high_quality_url
             
     except Exception as e:
@@ -621,7 +621,7 @@ def download_image(url, filepath, username):
     """Download high-quality image from URL to filepath with retry logic and enhanced debugging"""
     try:
         print(f'     [!] Starting download for {username}')
-        print(f'     📋 URL: {url}')
+        print(f'     [-] URL: {url}')
         print(f'     [!] Filepath: {filepath}')
         
         headers = {
@@ -633,9 +633,9 @@ def download_image(url, filepath, username):
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1'
         }
-        
-        print(f'     📥 Downloading high-quality image from: {url}')
-        
+
+        print(f'     [!] Downloading high-quality image from: {url}')
+
         # Ensure the directory exists
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
@@ -648,16 +648,16 @@ def download_image(url, filepath, username):
         
         for attempt, download_url in enumerate(urls_to_try, 1):
             try:
-                print(f'     🎯 Attempt {attempt}: {download_url}')
+                print(f'     [!] Attempt {attempt}: {download_url}')
                 response = requests.get(download_url, headers=headers, timeout=30)
                 print(f'     [!] Response status: {response.status_code}')
-                print(f'     📋 Content-Type: {response.headers.get("content-type", "unknown")}')
+                print(f'     [!] Content-Type: {response.headers.get("content-type", "unknown")}')
                 response.raise_for_status()
                 
                 # Check if we got a valid image
                 content_type = response.headers.get('content-type', '')
                 if content_type.startswith('image/'):
-                    print(f'     💾 Writing {len(response.content)} bytes to {filepath}')
+                    print(f'     [!] Writing {len(response.content)} bytes to {filepath}')
                     with open(filepath, 'wb') as f:
                         f.write(response.content)
                     
@@ -711,11 +711,11 @@ def main():
             print("   - The account is private")
             print("   - You're not logged in properly")
             print("   - The username is incorrect")
-            print("⏳ Retrying login and following fetch...")
+            print("[x] Retrying login and following fetch...")
             if login_to_twitter(driver):
                 following_data = get_following(driver, USERNAME)
             if not following_data:
-                print("[-] Still no following data after retry. Exiting.")
+                print("[!?] Still no following data after retry. Exiting.")
                 return
         
         print('\n2. Downloading profile pictures and checking mutual following...')
