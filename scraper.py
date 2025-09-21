@@ -163,10 +163,16 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
     
     print(f"[!] Starting comprehensive single-pass scroll through {page_type} list...")
     
+    # Ensure we're in the correct section before starting
+    if not is_actual_follower_section(driver):
+        print(f"[!] Warning: May not be in actual {page_type} section")
+    
     print("[!] Collecting initially visible users before scrolling...")
     try:
-        user_cells = driver.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
-        print(f"[!] Found {len(user_cells)} UserCell elements on initial view")
+        # Only collect from the main column, avoid sidebar suggestions
+        main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
+        user_cells = main_column.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+        print(f"[!] Found {len(user_cells)} UserCell elements in main column on initial view")
         if user_cells:
             collect_users_from_cells(user_cells, users_data)
         
@@ -176,6 +182,14 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
         print(f"[+] Collected {len(users_data)} users from initial view before scrolling")
     except Exception as e:
         print(f"[!] Error collecting initial users: {e}")
+        # Fallback to original method if main column not found
+        try:
+            user_cells = driver.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+            print(f"[!] Fallback: Found {len(user_cells)} UserCell elements on initial view")
+            if user_cells:
+                collect_users_from_cells(user_cells, users_data)
+        except Exception as e2:
+            print(f"[!] Fallback also failed: {e2}")
     
     while True:
         scroll_count += 1
@@ -186,9 +200,15 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
         
         old_count = len(users_data)
         try:
-            # Strategy 1: Look for UserCell elements (most reliable)
-            user_cells = driver.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
-            print(f"[!] Found {len(user_cells)} UserCell elements on current view")
+            # Strategy 1: Look for UserCell elements in main column (most reliable)
+            try:
+                main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
+                user_cells = main_column.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+                print(f"[!] Found {len(user_cells)} UserCell elements in main column on current view")
+            except:
+                # Fallback to all UserCells if main column not found
+                user_cells = driver.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+                print(f"[!] Fallback: Found {len(user_cells)} UserCell elements on current view")
             
             collect_users_from_cells(user_cells, users_data)
                     
@@ -204,12 +224,56 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
         new_count = len(users_data)
         if new_count == old_count:
             no_new_users_count += 1
-            print(f"[!] No new users found in this scroll (attempt {no_new_users_count}/3)")
-            print(f"[!] Trying a larger scroll to find more users...")
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight + 1000);")
-            time.sleep(SCROLL_PAUSE_TIME * 1.5)  
+            print(f"[!] No new users found in this scroll (attempt {no_new_users_count}/5)")
+            
+            # Try more aggressive scrolling when we don't find new users
+            if no_new_users_count <= 3:
+                print(f"[!] Trying a larger scroll to find more users...")
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight + 2000);")
+                time.sleep(SCROLL_PAUSE_TIME * 2)
+                
+                # Try clicking any "Show more" or "Load more" buttons
+                try:
+                    load_more_texts = ["Show more", "Load more", "See more"]
+                    for text in load_more_texts:
+                        buttons = driver.find_elements(By.XPATH, f"//*[contains(text(), '{text}')]")
+                        for button in buttons:
+                            try:
+                                if button.is_displayed() and button.is_enabled():
+                                    driver.execute_script("arguments[0].scrollIntoView();", button)
+                                    time.sleep(1)
+                                    driver.execute_script("arguments[0].click();", button)
+                                    print(f"[+] Clicked '{text}' button")
+                                    time.sleep(SCROLL_PAUSE_TIME)
+                                    break
+                            except:
+                                continue
+                except Exception as e:
+                    print(f"[!] Error trying to click load more buttons: {e}")
+            else:
+                # Even more aggressive final attempts
+                print(f"[!] Trying very aggressive scrolling for final attempts...")
+                for i in range(3):
+                    driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight + {3000 + (i * 1000)});")
+                    time.sleep(SCROLL_PAUSE_TIME)
+                    
+                    # Check for more users after aggressive scroll
+                    temp_old_count = len(users_data)
+                    try:
+                        main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
+                        user_cells = main_column.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+                        collect_users_from_cells(user_cells, users_data)
+                    except:
+                        user_cells = driver.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+                        collect_users_from_cells(user_cells, users_data)
+                    
+                    if len(users_data) > temp_old_count:
+                        print(f"[+] Aggressive scroll found {len(users_data) - temp_old_count} more users!")
+                        no_new_users_count = 0  # Reset counter
+                        break
         else:
             no_new_users_count = 0
+            print(f"[+] Found {new_count - old_count} new users in this scroll")
             
         print(f"[+] Collected {len(users_data)} users so far (scroll #{scroll_count})")
         
@@ -221,11 +285,32 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
             stagnant_height_count = 0
             last_height = new_height
             
-        if no_new_users_count >= 3 or stagnant_height_count >= 3:
-            if no_new_users_count >= 3:
+        if no_new_users_count >= 5 or stagnant_height_count >= 5:
+            if no_new_users_count >= 5:
                 print(f"[-] No new users found after {no_new_users_count} consecutive scrolls - stopping collection")
             else:
                 print(f"[-] Page height unchanged after {stagnant_height_count} consecutive scrolls - likely reached end of list")
+            
+            # Final verification: try one more time with different approach
+            print("[!] Performing final verification scroll...")
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight + 5000);")
+            time.sleep(SCROLL_PAUSE_TIME * 2)
+            
+            final_old_count = len(users_data)
+            try:
+                main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
+                user_cells = main_column.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+                collect_users_from_cells(user_cells, users_data)
+            except:
+                user_cells = driver.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+                collect_users_from_cells(user_cells, users_data)
+            
+            if len(users_data) > final_old_count:
+                print(f"[+] Final verification found {len(users_data) - final_old_count} more users!")
+                no_new_users_count = 0
+                stagnant_height_count = 0
+                continue
+                
             print(f"[+] Completed scroll with {scroll_count} total scrolls")
             break
         else:
@@ -259,28 +344,31 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
                     pass
         except Exception as e:
             print(f"[!] Error trying to click 'Show more' button: {e}")
-            
-        # Additional check: try to detect "end of list" indicators
-        # try:
-        #     page_source = driver.page_source.lower()
-        #     end_indicators = [
-        #         "you've reached the end",
-        #         "no more to show",
-        #         "that's all",
-        #         "end of list",
-        #         "nothing more to load",
-        #         "end of timeline"
-        #     ]
-        #     
-        #     for indicator in end_indicators:
-        #         if indicator in page_source:
-        #             print(f"[-] Detected end-of-list indicator: '{indicator}'")
-        #             print(f"[+] Completed scroll with {scroll_count} total scrolls")
-        #             return users_data
-        #             
-        # except Exception:
-        #     pass
         
+        # Additional check: try to detect "end of list" indicators more reliably
+        try:
+            page_source = driver.page_source.lower()
+            end_indicators = [
+                "you've reached the end",
+                "no more to show",
+                "that's all",
+                "end of list",
+                "nothing more to load",
+                "end of timeline",
+                "no more followers",
+                "no more following",
+                "you've seen it all"
+            ]
+            
+            for indicator in end_indicators:
+                if indicator in page_source:
+                    print(f"[-] Detected end-of-list indicator: '{indicator}'")
+                    print(f"[+] Completed scroll with {scroll_count} total scrolls")
+                    return users_data
+                    
+        except Exception:
+            pass
+            
         # Safety valve: if we've scrolled excessively (100+ times), something might be wrong
         if scroll_count > 100:
             print(f"[-] Safety stop at {scroll_count} scrolls - this seems excessive")
@@ -322,10 +410,101 @@ def extract_follow_date(cell, position):
     # Fallback: use position
     return f"position_{position}"
 
+def is_suggestion_section(cell):
+    """Check if a UserCell is part of a suggestion/recommendation section"""
+    try:
+        # Check parent containers for suggestion indicators
+        parent = cell
+        for _ in range(5):  # Check up to 5 levels up
+            try:
+                parent = parent.find_element(By.XPATH, "./..")
+                parent_text = parent.text.lower()
+                
+                # Look for suggestion section indicators
+                suggestion_indicators = [
+                    'you might like',
+                    'recommended for you',
+                    'who to follow',
+                    'suggested for you',
+                    'people you may know',
+                    'discover more',
+                    'follow more people',
+                    'suggestions',
+                    'recommended'
+                ]
+                
+                for indicator in suggestion_indicators:
+                    if indicator in parent_text:
+                        return True
+                        
+                # Check for specific data attributes that indicate suggestions
+                parent_html = parent.get_attribute('outerHTML')
+                if parent_html:
+                    suggestion_attributes = [
+                        'data-testid="sidebarColumn"',
+                        'data-testid="placementTracking"',
+                        'data-testid="UserRecommendations"',
+                        'aria-label="Timeline: Trending now"',
+                        'aria-label="Who to follow"'
+                    ]
+                    
+                    for attr in suggestion_attributes:
+                        if attr in parent_html:
+                            return True
+            except:
+                break
+                
+        # Additional check: look for suggestion indicators in nearby text
+        try:
+            # Get the preceding sibling elements to check for headers
+            preceding_elements = cell.find_elements(By.XPATH, "./preceding-sibling::*[position()<=3]")
+            for element in preceding_elements:
+                element_text = element.text.lower()
+                if any(indicator in element_text for indicator in ['you might like', 'recommended', 'suggestions', 'who to follow']):
+                    return True
+        except:
+            pass
+            
+    except Exception:
+        pass
+    
+    return False
+
+def is_actual_follower_section(driver):
+    """Check if we're currently in the actual followers/following section"""
+    try:
+        # Check the current URL to make sure we're on a followers/following page
+        current_url = driver.current_url.lower()
+        if not ('/followers' in current_url or '/following' in current_url):
+            return False
+            
+        # Look for main timeline container
+        main_containers = driver.find_elements(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
+        if not main_containers:
+            return False
+            
+        # Check that we're not in a suggestion sidebar
+        try:
+            sidebar_suggestions = driver.find_elements(By.CSS_SELECTOR, '[data-testid="sidebarColumn"]')
+            return True  # Main column exists, sidebar is separate
+        except:
+            return True
+            
+    except Exception:
+        return False
+
 def collect_users_from_cells(user_cells, users_data):
-    """Process user cells and extract user information"""
+    """Process user cells and extract user information, filtering out suggestions"""
+    actual_followers_count = 0
+    suggestions_filtered = 0
+    
     for cell in user_cells:
         try:
+            # First, check if this cell is part of a suggestion section
+            if is_suggestion_section(cell):
+                suggestions_filtered += 1
+                continue
+                
             # Check if this cell contains follow status indicators
             has_following = len(cell.find_elements(By.XPATH, ".//*[contains(text(), 'Following') or contains(text(), 'Follows you')]")) > 0
             
@@ -353,55 +532,126 @@ def collect_users_from_cells(user_cells, users_data):
                                 'has_status_indicator': has_following,
                                 'profile_pic_url': profile_pic_url
                             })
+                            actual_followers_count += 1
                             pic_status = "[+]" if profile_pic_url else "[-]"
                             print(f"[+] Added user: {username} (position {len(users_data)}) - Status: {'+' if has_following else '?'} - Pic: {pic_status}")
                             break  # Found a valid user in this cell, move to next cell
         except Exception as e:
             print(f"[!] Error processing cell: {e}")
             continue
+    
+    if suggestions_filtered > 0:
+        print(f"[!] Filtered out {suggestions_filtered} suggested users, added {actual_followers_count} actual followers")
 
 def try_alternative_selectors(driver, users_data):
-    """Try alternative selectors to find users"""
-    selectors = [
-        '[data-testid="cellInnerDiv"] a[href^="/"]',
-        'div[dir="ltr"] a[href^="/"]',
-        'a[role="link"][href^="/"]',
-        'a[href*="/"][role="link"]',
-        'a[href^="/"]'
-    ]
-    
-    for selector in selectors:
-        user_links = driver.find_elements(By.CSS_SELECTOR, selector)
-        print(f"[!] Trying selector '{selector}' - found {len(user_links)} links")
+    """Try alternative selectors to find users, avoiding suggestion sections"""
+    # Focus on main column first
+    try:
+        main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
+        print("[!] Trying alternative selectors within main column...")
         
-        for link in user_links:
-            try:
-                href = link.get_attribute('href')
-                if href and is_valid_user_link(href):
-                    username = extract_username_from_url(href)
-                    if username and is_valid_username(username):
-                        if not any(user['username'] == username for user in users_data):
-                            # Try to find the parent cell for profile pic extraction
-                            try:
-                                parent_cell = link.find_element(By.XPATH, "./ancestor::*[@data-testid='UserCell']")
-                                profile_pic_url = extract_profile_pic_from_cell(parent_cell, verbose=False)
-                            except:
-                                profile_pic_url = None
-                                
-                            users_data.append({
-                                'username': username,
-                                'follow_date': f"position_{len(users_data)}",
-                                'position': len(users_data),
-                                'has_status_indicator': False,
-                                'profile_pic_url': profile_pic_url
-                            })
-                            pic_status = "[+]" if profile_pic_url else "[-]"
-                            print(f"[+] Added user (fallback): {username} - Pic: {pic_status}")
-            except Exception:
-                continue
+        selectors = [
+            '[data-testid="cellInnerDiv"] a[href^="/"]',
+            'div[dir="ltr"] a[href^="/"]',
+            'a[role="link"][href^="/"]',
+            'a[href*="/"][role="link"]'
+        ]
         
-        if len(users_data) > 0:
-            break  # Found some users with this selector
+        for selector in selectors:
+            user_links = main_column.find_elements(By.CSS_SELECTOR, selector)
+            print(f"[!] Trying selector '{selector}' in main column - found {len(user_links)} links")
+            
+            for link in user_links:
+                try:
+                    href = link.get_attribute('href')
+                    if href and is_valid_user_link(href):
+                        username = extract_username_from_url(href)
+                        if username and is_valid_username(username):
+                            if not any(user['username'] == username for user in users_data):
+                                # Try to find the parent cell for profile pic extraction
+                                try:
+                                    parent_cell = link.find_element(By.XPATH, "./ancestor::*[@data-testid='UserCell']")
+                                    
+                                    # Check if this is a suggestion
+                                    if is_suggestion_section(parent_cell):
+                                        continue
+                                        
+                                    profile_pic_url = extract_profile_pic_from_cell(parent_cell, verbose=False)
+                                except:
+                                    profile_pic_url = None
+                                    
+                                users_data.append({
+                                    'username': username,
+                                    'follow_date': f"position_{len(users_data)}",
+                                    'position': len(users_data),
+                                    'has_status_indicator': False,
+                                    'profile_pic_url': profile_pic_url
+                                })
+                                pic_status = "[+]" if profile_pic_url else "[-]"
+                                print(f"[+] Added user (fallback): {username} - Pic: {pic_status}")
+                except Exception:
+                    continue
+            
+            if len(users_data) > 0:
+                break  # Found some users with this selector
+                
+    except Exception as e:
+        print(f"[!] Main column not found, trying global fallback: {e}")
+        
+        # Global fallback if main column not accessible
+        selectors = [
+            '[data-testid="cellInnerDiv"] a[href^="/"]',
+            'div[dir="ltr"] a[href^="/"]',
+            'a[role="link"][href^="/"]',
+            'a[href*="/"][role="link"]',
+            'a[href^="/"]'
+        ]
+        
+        for selector in selectors:
+            user_links = driver.find_elements(By.CSS_SELECTOR, selector)
+            print(f"[!] Trying global selector '{selector}' - found {len(user_links)} links")
+            
+            suggestions_skipped = 0
+            for link in user_links:
+                try:
+                    # Check if link is in sidebar or suggestion area
+                    try:
+                        sidebar_parent = link.find_element(By.XPATH, "./ancestor::*[@data-testid='sidebarColumn']")
+                        if sidebar_parent:
+                            suggestions_skipped += 1
+                            continue  # Skip sidebar suggestions
+                    except:
+                        pass  # Not in sidebar, continue processing
+                        
+                    href = link.get_attribute('href')
+                    if href and is_valid_user_link(href):
+                        username = extract_username_from_url(href)
+                        if username and is_valid_username(username):
+                            if not any(user['username'] == username for user in users_data):
+                                # Try to find the parent cell for profile pic extraction
+                                try:
+                                    parent_cell = link.find_element(By.XPATH, "./ancestor::*[@data-testid='UserCell']")
+                                    profile_pic_url = extract_profile_pic_from_cell(parent_cell, verbose=False)
+                                except:
+                                    profile_pic_url = None
+                                    
+                                users_data.append({
+                                    'username': username,
+                                    'follow_date': f"position_{len(users_data)}",
+                                    'position': len(users_data),
+                                    'has_status_indicator': False,
+                                    'profile_pic_url': profile_pic_url
+                                })
+                                pic_status = "[+]" if profile_pic_url else "[-]"
+                                print(f"[+] Added user (global fallback): {username} - Pic: {pic_status}")
+                except Exception:
+                    continue
+            
+            if suggestions_skipped > 0:
+                print(f"[!] Skipped {suggestions_skipped} sidebar suggestions in global fallback")
+            
+            if len(users_data) > 0:
+                break  # Found some users with this selector
 
 def is_valid_twitter_profile_url(url, verbose=True):
     """Check if a URL is a valid Twitter profile image URL"""
@@ -881,6 +1131,15 @@ def main():
                 'pic_downloaded': pic_downloaded,
                 'filename': new_filename
             })
+        
+        print(f'\n=== COLLECTION SUMMARY ===')
+        print(f'[+] Total people you follow found: {len(following_data)}')
+        print(f'[!] Expected vs Actual: You mentioned following 1368 people')
+        if len(following_data) < 1300:
+            print(f'[!] Note: Found {len(following_data)} which may indicate some suggestions were filtered out')
+            print(f'[!] This is good - it means the improved filtering is working!')
+        elif len(following_data) > 1400:
+            print(f'[!] Warning: Found more than expected - some suggestions may have been included')
         
         print(f'\n=== SUMMARY ===')
         list_type = "mutual following (people who follow you back)"
