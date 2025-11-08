@@ -1,6 +1,10 @@
 import os
 import requests
 import json
+import shutil
+import tempfile
+import platform
+from pathlib import Path
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -23,9 +27,109 @@ JSON_OUTPUT_FILE = 'mutual_following.json'  # JSON output file
 # --- SETUP ---
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+def find_firefox_profile():
+    """Find the default Firefox profile directory for the current user"""
+    system = platform.system()
+    
+    if system == "Windows":
+        profile_base = Path(os.environ.get('APPDATA', '')) / 'Mozilla' / 'Firefox' / 'Profiles'
+    elif system == "Darwin":  # macOS
+        profile_base = Path.home() / 'Library' / 'Application Support' / 'Firefox' / 'Profiles'
+    elif system == "Linux":
+        profile_base = Path.home() / '.mozilla' / 'firefox'
+    else:
+        print(f"[!] Unsupported operating system: {system}")
+        return None
+    
+    if not profile_base.exists():
+        print(f"[!] Firefox profiles directory not found: {profile_base}")
+        return None
+    
+    # Look for the default profile (usually ends with .default or .default-release)
+    profiles = list(profile_base.glob('*.default*'))
+    
+    if not profiles:
+        # If no default profile, try to find any profile
+        profiles = [p for p in profile_base.iterdir() if p.is_dir() and not p.name.startswith('.')]
+    
+    if profiles:
+        # Sort by modification time to get the most recently used profile
+        profiles.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        selected_profile = profiles[0]
+        print(f"[+] Found Firefox profile: {selected_profile}")
+        return selected_profile
+    else:
+        print("[!] No Firefox profiles found")
+        return None
+
+def copy_firefox_profile(source_profile):
+    """Create a temporary copy of the Firefox profile for use with Selenium"""
+    if not source_profile or not source_profile.exists():
+        print("[!] Source profile does not exist")
+        return None
+    
+    try:
+        # Create a temporary directory for the profile copy
+        temp_dir = tempfile.mkdtemp(prefix='firefox_profile_')
+        temp_profile = Path(temp_dir)
+        
+        print(f"[!] Copying Firefox profile to temporary location...")
+        print(f"[!] This may take a moment...")
+        
+        # Files to copy for login session (we don't need everything)
+        essential_files = [
+            'cookies.sqlite',
+            'cookies.sqlite-shm',
+            'cookies.sqlite-wal',
+            'key4.db',  # For password/login storage
+            'logins.json',  # Login credentials
+            'cert9.db',  # Certificates
+            'prefs.js',  # Preferences
+            'permissions.sqlite',  # Site permissions
+            'content-prefs.sqlite',  # Content preferences
+            'webappsstore.sqlite',  # Local storage
+        ]
+        
+        # Copy essential files
+        copied_files = 0
+        for file_name in essential_files:
+            source_file = source_profile / file_name
+            if source_file.exists():
+                try:
+                    shutil.copy2(source_file, temp_profile / file_name)
+                    copied_files += 1
+                except Exception as e:
+                    print(f"[!] Warning: Could not copy {file_name}: {e}")
+        
+        if copied_files > 0:
+            print(f"[+] Copied {copied_files} profile files successfully")
+            return temp_profile
+        else:
+            print("[!] No profile files were copied")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return None
+            
+    except Exception as e:
+        print(f"[!] Error copying Firefox profile: {e}")
+        return None
+
 def setup_driver():
     """Setup Firefox WebDriver with optimal settings for Twitter scraping"""
     print("[!] Setting up Firefox WebDriver...")
+    
+    # Try to find and copy user's Firefox profile
+    firefox_profile = find_firefox_profile()
+    temp_profile = None
+    
+    if firefox_profile:
+        print("[!] Attempting to use your existing Firefox profile for automatic login...")
+        temp_profile = copy_firefox_profile(firefox_profile)
+        if temp_profile:
+            print("[+] Firefox profile copied successfully - you may already be logged in!")
+        else:
+            print("[!] Could not copy profile - you'll need to log in manually")
+    else:
+        print("[!] No Firefox profile found - you'll need to log in manually")
     
     try:
         service = Service(GeckoDriverManager().install())
@@ -56,6 +160,12 @@ def setup_driver():
     firefox_options.set_preference('browser.cache.disk.enable', False)
     firefox_options.set_preference('browser.cache.memory.enable', False)
     firefox_options.set_preference('browser.sessionstore.max_tabs_undo', 0)
+    
+    # Use the copied profile if available
+    if temp_profile:
+        firefox_options.add_argument('-profile')
+        firefox_options.add_argument(str(temp_profile))
+        print(f"[+] Using profile: {temp_profile}")
 
     try:
         if service:
@@ -65,9 +175,20 @@ def setup_driver():
         
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         print("[+] Firefox browser launched successfully")
+        
+        # Store temp profile path in driver for cleanup later
+        driver.temp_profile_path = temp_profile
+        
         return driver
         
     except Exception as e:
+        # Cleanup temp profile if driver creation failed
+        if temp_profile and temp_profile.exists():
+            try:
+                shutil.rmtree(temp_profile, ignore_errors=True)
+            except:
+                pass
+        
         print(f"[!?] Failed to start Firefox WebDriver: {e}")
         print("\n[!] TROUBLESHOOTING:")
         print("1. Make sure Mozilla Firefox browser is installed")
@@ -78,6 +199,34 @@ def setup_driver():
 
 def login_to_twitter(driver):
     """Navigate to Twitter login and wait for user to log in manually"""
+    print("\n[!] Checking login status...")
+    
+    # First, try to navigate to the home page to check if already logged in
+    driver.get('https://x.com/home')
+    time.sleep(5)  # Wait for page to load
+    
+    # Check if already logged in
+    logged_in_elements = [
+        '[data-testid="SideNav_AccountSwitcher_Button"]',
+        '[data-testid="AppTabBar_Profile_Link"]', 
+        '[aria-label="Profile"]',
+        '[data-testid="primaryColumn"]',
+        '[data-testid="composeTweet"]',
+        '[aria-label="Home timeline"]'
+    ]
+    
+    for selector in logged_in_elements:
+        try:
+            element = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+            )
+            if element:
+                print("[+] Already logged in! Using existing session.")
+                return True
+        except TimeoutException:
+            continue
+    
+    # Not logged in, proceed with manual login
     print("\n[!] LOGIN REQUIRED")
     print("=" * 50)
     print("X/Twitter requires you to be logged in to view following lists.")
@@ -103,15 +252,6 @@ def login_to_twitter(driver):
             
             if 'login' not in current_url:
                 try:
-                    logged_in_elements = [
-                        '[data-testid="SideNav_AccountSwitcher_Button"]',
-                        '[data-testid="AppTabBar_Profile_Link"]', 
-                        '[aria-label="Profile"]',
-                        '[data-testid="primaryColumn"]',
-                        '[data-testid="composeTweet"]',
-                        '[aria-label="Home timeline"]'
-                    ]
-                    
                     for selector in logged_in_elements:
                         try:
                             element = WebDriverWait(driver, 3).until(
@@ -500,6 +640,7 @@ def collect_users_from_cells(user_cells, users_data):
     
     for cell in user_cells:
         try:
+<<<<<<< Updated upstream
             # First, check if this cell is part of a suggestion section
             if is_suggestion_section(cell):
                 suggestions_filtered += 1
@@ -507,6 +648,12 @@ def collect_users_from_cells(user_cells, users_data):
                 
             # Check if this cell contains follow status indicators
             has_following = len(cell.find_elements(By.XPATH, ".//*[contains(text(), 'Following') or contains(text(), 'Follows you')]")) > 0
+=======
+            # Check if this cell has the "Follows you" indicator (mutual follow)
+            # This is the key element from template.js: [data-testid="userFollowIndicator"]
+            follows_you_indicator = cell.find_elements(By.CSS_SELECTOR, '[data-testid="userFollowIndicator"]')
+            is_mutual = len(follows_you_indicator) > 0
+>>>>>>> Stashed changes
             
             # Find username link - try multiple approaches
             username_links = cell.find_elements(By.CSS_SELECTOR, 'a[href^="/"]')
@@ -529,12 +676,13 @@ def collect_users_from_cells(user_cells, users_data):
                                 'username': username,
                                 'follow_date': follow_date,
                                 'position': len(users_data),
-                                'has_status_indicator': has_following,
+                                'is_mutual': is_mutual,  # Changed from has_status_indicator
                                 'profile_pic_url': profile_pic_url
                             })
                             actual_followers_count += 1
                             pic_status = "[+]" if profile_pic_url else "[-]"
-                            print(f"[+] Added user: {username} (position {len(users_data)}) - Status: {'+' if has_following else '?'} - Pic: {pic_status}")
+                            mutual_status = "MUTUAL" if is_mutual else "not mutual"
+                            print(f"[+] Added user: {username} (position {len(users_data)}) - {mutual_status} - Pic: {pic_status}")
                             break  # Found a valid user in this cell, move to next cell
         except Exception as e:
             print(f"[!] Error processing cell: {e}")
@@ -550,12 +698,46 @@ def try_alternative_selectors(driver, users_data):
         main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
         print("[!] Trying alternative selectors within main column...")
         
+<<<<<<< Updated upstream
         selectors = [
             '[data-testid="cellInnerDiv"] a[href^="/"]',
             'div[dir="ltr"] a[href^="/"]',
             'a[role="link"][href^="/"]',
             'a[href*="/"][role="link"]'
         ]
+=======
+        for link in user_links:
+            try:
+                href = link.get_attribute('href')
+                if href and is_valid_user_link(href):
+                    username = extract_username_from_url(href)
+                    if username and is_valid_username(username):
+                        if not any(user['username'] == username for user in users_data):
+                            # Try to find the parent cell to check for mutual indicator
+                            is_mutual = False
+                            profile_pic_url = None
+                            try:
+                                parent_cell = link.find_element(By.XPATH, "./ancestor::*[@data-testid='UserCell']")
+                                # Check for mutual follow indicator
+                                follows_you_indicator = parent_cell.find_elements(By.CSS_SELECTOR, '[data-testid="userFollowIndicator"]')
+                                is_mutual = len(follows_you_indicator) > 0
+                                profile_pic_url = extract_profile_pic_from_cell(parent_cell, verbose=False)
+                            except:
+                                pass
+                                
+                            users_data.append({
+                                'username': username,
+                                'follow_date': f"position_{len(users_data)}",
+                                'position': len(users_data),
+                                'is_mutual': is_mutual,
+                                'profile_pic_url': profile_pic_url
+                            })
+                            pic_status = "[+]" if profile_pic_url else "[-]"
+                            mutual_status = "MUTUAL" if is_mutual else "not mutual"
+                            print(f"[+] Added user (fallback): {username} - {mutual_status} - Pic: {pic_status}")
+            except Exception:
+                continue
+>>>>>>> Stashed changes
         
         for selector in selectors:
             user_links = main_column.find_elements(By.CSS_SELECTOR, selector)
@@ -843,7 +1025,11 @@ def get_profile_pic(driver, username):
                 high_quality_url = re.sub(r'_bigger', '', high_quality_url)
                 high_quality_url = re.sub(r'_mini', '', high_quality_url)
                 
+<<<<<<< Updated upstream
                 print(f'     [-] High-quality URL: {high_quality_url}')
+=======
+                print(f'     [>] High-quality URL: {high_quality_url}')
+>>>>>>> Stashed changes
                 return high_quality_url
         else:
             # Fallback: try to find any profile image in the page source
@@ -859,7 +1045,11 @@ def get_profile_pic(driver, username):
                 high_quality_url = re.sub(r'_bigger', '', high_quality_url)
                 high_quality_url = re.sub(r'_mini', '', high_quality_url)
                 
+<<<<<<< Updated upstream
                 print(f'     [-] High-quality URL (fallback): {high_quality_url}')
+=======
+                print(f'     [>] High-quality URL (fallback): {high_quality_url}')
+>>>>>>> Stashed changes
                 return high_quality_url
             
     except Exception as e:
@@ -871,7 +1061,11 @@ def download_image(url, filepath, username):
     """Download high-quality image from URL to filepath with retry logic and enhanced debugging"""
     try:
         print(f'     [!] Starting download for {username}')
+<<<<<<< Updated upstream
         print(f'     [-] URL: {url}')
+=======
+        print(f'     [!] URL: {url}')
+>>>>>>> Stashed changes
         print(f'     [!] Filepath: {filepath}')
         
         headers = {
@@ -883,9 +1077,15 @@ def download_image(url, filepath, username):
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1'
         }
+<<<<<<< Updated upstream
 
         print(f'     [!] Downloading high-quality image from: {url}')
 
+=======
+        
+        print(f'     [!] Downloading high-quality image from: {url}')
+        
+>>>>>>> Stashed changes
         # Ensure the directory exists
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
@@ -961,129 +1161,72 @@ def main():
             print("   - The account is private")
             print("   - You're not logged in properly")
             print("   - The username is incorrect")
+<<<<<<< Updated upstream
             print("[x] Retrying login and following fetch...")
+=======
+            print("[!] Retrying login and following fetch...")
+>>>>>>> Stashed changes
             if login_to_twitter(driver):
                 following_data = get_following(driver, USERNAME)
             if not following_data:
                 print("[!?] Still no following data after retry. Exiting.")
                 return
         
-        print('\n2. Downloading profile pictures and checking mutual following...')
+        print('\n2. Filtering for mutual follows and downloading profile pictures...')
         
-        # Get your profile page to check who follows you back
-        your_profile_url = f'https://x.com/{USERNAME}'
-        driver.get(your_profile_url)
-        time.sleep(PROFILE_CHECK_DELAY)
+        # Filter for mutual followers (people who follow you back)
+        # This is done ON THE FOLLOWING PAGE ITSELF using the userFollowIndicator
+        mutual_following_data = [user for user in following_data if user.get('is_mutual', False)]
         
-        # Now we'll check each person you follow - download pic first, then check if they follow back
-        mutual_following_data = []
+        print(f'\n[+] Found {len(mutual_following_data)} mutual follows out of {len(following_data)} total following')
+        print(f'[!] These users have the "Follows you" indicator on your following page')
         
-        for idx, user_data in enumerate(following_data):
+        if len(mutual_following_data) == 0:
+            print("[-] No mutual follows found. This could mean:")
+            print("   - None of the people you follow also follow you back")
+            print("   - The page elements didn't load correctly")
+            print("   - Twitter's layout has changed")
+            return
+        
+        # Download profile pictures for mutual follows
+        print(f'\n[!] Downloading profile pictures for {len(mutual_following_data)} mutual followers...')
+        
+        for idx, user_data in enumerate(mutual_following_data):
             username = user_data['username']
-            print(f"\n[!] Processing @{username}... ({idx + 1}/{len(following_data)})")
+            print(f"\n[!] Processing @{username}... ({idx + 1}/{len(mutual_following_data)})")
             
-            # STEP 1: Visit their profile and check if they follow you back
-            profile_url = f'https://x.com/{username}'
-            print(f"     [!] Navigating to {profile_url}")
-            driver.get(profile_url)
-            time.sleep(PROFILE_CHECK_DELAY)  # Longer delay to avoid rate limiting
-            
-            # First check if they follow you back
-            print(f"     [!] Checking if @{username} follows you back...")
-            follows_you_back = False
-            pic_url = None
+            pic_url = user_data.get('profile_pic_url')
             pic_downloaded = False
             temp_filename = None
-            temp_filepath = None
             
-            try:
-                # Add a small delay before checking page source
-                time.sleep(2)
-                
-                # Multiple detection methods for follows you
-                
-                # Method 1: Check page source text
-                page_source = driver.page_source.lower()
-                follows_you_indicators = [
-                    'follows you',
-                    'follow you',
-                    'following you',
-                    'follows @' + USERNAME.lower(),
-                    'follow @' + USERNAME.lower(),
-                    'following @' + USERNAME.lower()
-                ]
-                
-                if any(indicator in page_source for indicator in follows_you_indicators):
-                    follows_you_back = True
-                    print(f"     [+] Follow back detected via text indicators")
-                
-                # Method 2: Try to find follows you element with CSS
-                if not follows_you_back:
-                    try:
-                        follows_you_elements = driver.find_elements(By.CSS_SELECTOR, 'span[dir="ltr"]')
-                        for element in follows_you_elements:
-                            try:
-                                text = element.text.lower()
-                                if any(indicator in text for indicator in ['follows you', 'follow you']):
-                                    follows_you_back = True
-                                    print(f"     [+] Follow back detected via element text")
-                                    break
-                            except:
-                                pass
-                    except:
-                        pass
-                
-                # STEP 2: Only download profile picture if they follow you back
-                if follows_you_back:
-                    print(f"     [+] @{username} follows you back! (Mutual following)")
-                    
-                    # Get profile picture URL
-                    pic_url = user_data.get('profile_pic_url')
-                    if not pic_url:
-                        print(f'     [!] No pre-extracted profile pic, fetching from profile page...')
-                        pic_url = get_profile_pic(driver, username)
-                    else:
-                        # Validate the pre-extracted URL
-                        if not is_valid_twitter_profile_url(pic_url, verbose=False):
-                            print(f'     [!?] Pre-extracted URL is invalid, fetching from profile page...')
-                            pic_url = get_profile_pic(driver, username)
-                    
-                    # Download the profile picture
-                    if pic_url:
-                        # Create filename with temporary numbering (we'll rename later)
-                        temp_filename = f'temp_{idx:03d}_@{username}.jpg'
-                        temp_filepath = os.path.join(DOWNLOAD_DIR, temp_filename)
-                        
-                        pic_downloaded = download_image(pic_url, temp_filepath, username)
-                        if pic_downloaded:
-                            print(f'     [+] Profile picture downloaded to {temp_filename}')
-                        else:
-                            print(f'     [-] Failed to download profile picture')
-                    else:
-                        print(f'     [-] Could not find profile picture URL')
-                    
-                    # Add to mutual following data
-                    mutual_following_data.append({
-                        'username': user_data['username'],
-                        'follow_date': user_data['follow_date'],
-                        'position': user_data['position'],
-                        'source': 'mutual_following',
-                        'profile_pic_url': pic_url,
-                        'pic_downloaded': pic_downloaded,
-                        'temp_filename': temp_filename if pic_downloaded else None
-                    })
-                else:
-                    print(f"     [-] @{username} doesn't follow you back - skipping profile picture download")
-                    
-            except Exception as e:
-                print(f"     [!] Error checking @{username}: {e}")
-                # If error, still keep the downloaded pic in case it's useful
-                continue
-            
-            # Add delay between each user to avoid rate limiting
-            if idx < len(following_data) - 1:  # Don't delay after the last user
-                print(f"     [!] Waiting {PROFILE_CHECK_DELAY} seconds to avoid rate limiting...")
+            # If we don't have a profile pic URL from the cell, fetch it from their profile
+            if not pic_url or not is_valid_twitter_profile_url(pic_url, verbose=False):
+                print(f'     [!] Fetching profile pic from profile page...')
+                pic_url = get_profile_pic(driver, username)
+                # Update the user_data with the fetched URL
+                user_data['profile_pic_url'] = pic_url
+                # Add delay after visiting profile page
                 time.sleep(PROFILE_CHECK_DELAY)
+            else:
+                print(f'     [+] Using profile pic URL from following page')
+            
+            # Download the profile picture
+            if pic_url:
+                # Create filename with temporary numbering (we'll rename later)
+                temp_filename = f'temp_{idx:03d}_@{username}.jpg'
+                temp_filepath = os.path.join(DOWNLOAD_DIR, temp_filename)
+                
+                pic_downloaded = download_image(pic_url, temp_filepath, username)
+                if pic_downloaded:
+                    print(f'     [+] Profile picture downloaded to {temp_filename}')
+                else:
+                    print(f'     [-] Failed to download profile picture')
+            else:
+                print(f'     [-] Could not find profile picture URL')
+            
+            # Update user_data with download status
+            user_data['pic_downloaded'] = pic_downloaded
+            user_data['temp_filename'] = temp_filename if pic_downloaded else None
         
         # Sort by position: Twitter shows newest first at position 0
         # We want oldest first (#1 = oldest follow), so we need to reverse the order
@@ -1179,7 +1322,20 @@ def main():
         traceback.print_exc()
     finally:
         print("\n[!] Closing browser...")
+        
+        # Cleanup temporary profile if it exists
+        temp_profile = getattr(driver, 'temp_profile_path', None)
+        
         driver.quit()
+        
+        if temp_profile and temp_profile.exists():
+            print("[!] Cleaning up temporary profile...")
+            try:
+                shutil.rmtree(temp_profile, ignore_errors=True)
+                print("[+] Temporary profile cleaned up")
+            except Exception as e:
+                print(f"[!] Could not remove temporary profile: {e}")
+        
         print("[+] Done!")
 
 if __name__ == '__main__':
