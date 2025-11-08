@@ -19,48 +19,154 @@ import re
 
 # --- CONFIG ---
 USERNAME = input("Enter your X/Twitter username (without @): ").strip()
+print("\nWhat would you like to download?")
+print("1. Only mutual followers (people who follow you back)")
+print("2. All followers (both mutual and non-mutual)")
+print("3. Both - separate files for mutuals and non-mutuals")
+download_choice = input("Enter your choice (1, 2, or 3): ").strip()
+
 DOWNLOAD_DIR = 'profile_pics'
 SCROLL_PAUSE_TIME = 3      # Time to wait between scrolls (increased for rate limiting)
 PROFILE_CHECK_DELAY = 10    # Delay between profile visits to avoid 429 errors
 JSON_OUTPUT_FILE = 'mutual_following.json'  # JSON output file
+NO_NEW_USERS_LIMIT = 5     # Stop scrolling after this many attempts with no new users
 
 # --- SETUP ---
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 def find_firefox_profile():
-    """Find the default Firefox profile directory for the current user"""
+    """Find Firefox profile directories and let user choose which version to use"""
     system = platform.system()
     
     if system == "Windows":
-        profile_base = Path(os.environ.get('APPDATA', '')) / 'Mozilla' / 'Firefox' / 'Profiles'
+        appdata = Path(os.environ.get('APPDATA', ''))
+        main_profile_dir = appdata / 'Mozilla' / 'Firefox' / 'Profiles'
+        
+        if not main_profile_dir.exists():
+            print("\n[!] No Firefox profiles directory found")
+            return None
+        
+        # Get all profiles
+        all_profiles = [p for p in main_profile_dir.iterdir() if p.is_dir() and not p.name.startswith('.')]
+        
+        if not all_profiles:
+            print("\n[!] No Firefox profiles found")
+            return None
+        
+        # Categorize profiles by variant based on naming patterns
+        available_variants = []
+        
+        for profile in all_profiles:
+            profile_name = profile.name
+            mtime = profile.stat().st_mtime
+            
+            # Determine variant based on profile name
+            if 'dev-edition' in profile_name.lower():
+                variant_name = 'Firefox Developer Edition'
+            elif 'nightly' in profile_name.lower():
+                variant_name = 'Firefox Nightly'
+            elif 'esr' in profile_name.lower():
+                variant_name = 'Firefox ESR'
+            elif 'default' in profile_name.lower():
+                variant_name = 'Firefox'
+            else:
+                variant_name = 'Firefox (Custom Profile)'
+            
+            available_variants.append({
+                'name': variant_name,
+                'profile': profile,
+                'profile_name': profile_name,
+                'mtime': mtime
+            })
+        
     elif system == "Darwin":  # macOS
-        profile_base = Path.home() / 'Library' / 'Application Support' / 'Firefox' / 'Profiles'
+        base = Path.home() / 'Library' / 'Application Support'
+        firefox_variants = [
+            ('Firefox', base / 'Firefox' / 'Profiles'),
+            ('Firefox Developer Edition', base / 'Firefox Developer Edition' / 'Profiles'),
+            ('Firefox Nightly', base / 'Firefox Nightly' / 'Profiles'),
+            ('Firefox ESR', base / 'Firefox ESR' / 'Profiles'),
+        ]
+        
+        available_variants = []
+        for variant_name, profile_base in firefox_variants:
+            if profile_base.exists():
+                profiles = list(profile_base.glob('*.default*'))
+                if not profiles:
+                    profiles = [p for p in profile_base.iterdir() if p.is_dir() and not p.name.startswith('.')]
+                
+                if profiles:
+                    profiles.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    available_variants.append({
+                        'name': variant_name,
+                        'profile': profiles[0],
+                        'profile_name': profiles[0].name,
+                        'mtime': profiles[0].stat().st_mtime
+                    })
+        
     elif system == "Linux":
-        profile_base = Path.home() / '.mozilla' / 'firefox'
+        home = Path.home()
+        firefox_variants = [
+            ('Firefox', home / '.mozilla' / 'firefox'),
+            ('Firefox Developer Edition', home / '.mozilla' / 'firefox-dev'),
+            ('Firefox Nightly', home / '.mozilla' / 'firefox-nightly'),
+            ('Firefox ESR', home / '.mozilla' / 'firefox-esr'),
+        ]
+        
+        available_variants = []
+        for variant_name, profile_base in firefox_variants:
+            if profile_base.exists():
+                profiles = list(profile_base.glob('*.default*'))
+                if not profiles:
+                    profiles = [p for p in profile_base.iterdir() if p.is_dir() and not p.name.startswith('.')]
+                
+                if profiles:
+                    profiles.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    available_variants.append({
+                        'name': variant_name,
+                        'profile': profiles[0],
+                        'profile_name': profiles[0].name,
+                        'mtime': profiles[0].stat().st_mtime
+                    })
     else:
         print(f"[!] Unsupported operating system: {system}")
         return None
     
-    if not profile_base.exists():
-        print(f"[!] Firefox profiles directory not found: {profile_base}")
+    if not available_variants:
+        print("\n[!] No Firefox profiles found")
         return None
     
-    # Look for the default profile (usually ends with .default or .default-release)
-    profiles = list(profile_base.glob('*.default*'))
+    # Sort by modification time (most recent first)
+    available_variants.sort(key=lambda v: v['mtime'], reverse=True)
     
-    if not profiles:
-        # If no default profile, try to find any profile
-        profiles = [p for p in profile_base.iterdir() if p.is_dir() and not p.name.startswith('.')]
+    # Let user choose which Firefox version to use
+    print("\n[!] Found the following Firefox profiles:")
+    for idx, variant in enumerate(available_variants, 1):
+        print(f"  {idx}. {variant['name']}")
+        print(f"     Profile: {variant['profile_name']}")
     
-    if profiles:
-        # Sort by modification time to get the most recently used profile
-        profiles.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        selected_profile = profiles[0]
-        print(f"[+] Found Firefox profile: {selected_profile}")
-        return selected_profile
-    else:
-        print("[!] No Firefox profiles found")
-        return None
+    default_choice = 1
+    print(f"\n[!] Most recently used: {available_variants[0]['name']}")
+    
+    while True:
+        choice = input(f"Enter your choice (1-{len(available_variants)}) or press Enter for default [{default_choice}]: ").strip()
+        
+        if choice == '':
+            choice = default_choice
+            break
+        
+        try:
+            choice = int(choice)
+            if 1 <= choice <= len(available_variants):
+                break
+            else:
+                print(f"[!] Please enter a number between 1 and {len(available_variants)}")
+        except ValueError:
+            print("[!] Please enter a valid number")
+    
+    selected = available_variants[choice - 1]
+    print(f"[+] Using {selected['name']}: {selected['profile_name']}")
+    return selected['profile']
 
 def copy_firefox_profile(source_profile):
     """Create a temporary copy of the Firefox profile for use with Selenium"""
@@ -76,33 +182,53 @@ def copy_firefox_profile(source_profile):
         print(f"[!] Copying Firefox profile to temporary location...")
         print(f"[!] This may take a moment...")
         
-        # Files to copy for login session (we don't need everything)
-        essential_files = [
+        # Files and directories essential for login session
+        essential_items = [
+
             'cookies.sqlite',
             'cookies.sqlite-shm',
             'cookies.sqlite-wal',
-            'key4.db',  # For password/login storage
-            'logins.json',  # Login credentials
-            'cert9.db',  # Certificates
-            'prefs.js',  # Preferences
-            'permissions.sqlite',  # Site permissions
-            'content-prefs.sqlite',  # Content preferences
+            'key4.db',              # Password/login storage
+            'key3.db',              # Legacy key storage
+            'logins.json',          # Login credentials
+            'cert9.db',             # Certificates
+            'cert8.db',             # Legacy certificates
+            'prefs.js',             # Preferences
+            'user.js',              # User preferences
+            'permissions.sqlite',   # Site permissions
+            'content-prefs.sqlite', # Content preferences
             'webappsstore.sqlite',  # Local storage
+            'sessionstore.jsonlz4', # Session data
+            'sessionstore.js',      # Legacy session data
+            'sessionstore-backups', # Session backups directory
+            'storage',              # Storage directory (important for login tokens)
+            'storage.sqlite',       # Storage database
         ]
         
-        # Copy essential files
-        copied_files = 0
-        for file_name in essential_files:
-            source_file = source_profile / file_name
-            if source_file.exists():
+        # Copy essential files and directories
+        copied_count = 0
+        for item_name in essential_items:
+            source_item = source_profile / item_name
+            dest_item = temp_profile / item_name
+            
+            if source_item.exists():
                 try:
-                    shutil.copy2(source_file, temp_profile / file_name)
-                    copied_files += 1
+                    if source_item.is_dir():
+                        # Copy entire directory
+                        shutil.copytree(source_item, dest_item, ignore_dangling_symlinks=True)
+                        copied_count += 1
+                    else:
+                        # Copy file
+                        dest_item.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source_item, dest_item)
+                        copied_count += 1
                 except Exception as e:
-                    print(f"[!] Warning: Could not copy {file_name}: {e}")
+                    # Continue even if some files fail
+                    pass
         
-        if copied_files > 0:
-            print(f"[+] Copied {copied_files} profile files successfully")
+        print(f"[+] Copied {copied_count}/{len(essential_items)} profile items")
+        
+        if copied_count > 0:
             return temp_profile
         else:
             print("[!] No profile files were copied")
@@ -111,6 +237,8 @@ def copy_firefox_profile(source_profile):
             
     except Exception as e:
         print(f"[!] Error copying Firefox profile: {e}")
+        import traceback
+        print(f"[!] Traceback: {traceback.format_exc()}")
         return None
 
 def setup_driver():
@@ -364,7 +492,7 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
         new_count = len(users_data)
         if new_count == old_count:
             no_new_users_count += 1
-            print(f"[!] No new users found in this scroll (attempt {no_new_users_count}/5)")
+            print(f"[!] No new users found in this scroll (attempt {no_new_users_count}/{NO_NEW_USERS_LIMIT})")
             
             # Try more aggressive scrolling when we don't find new users
             if no_new_users_count <= 3:
@@ -425,8 +553,8 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
             stagnant_height_count = 0
             last_height = new_height
             
-        if no_new_users_count >= 5 or stagnant_height_count >= 5:
-            if no_new_users_count >= 5:
+        if no_new_users_count >= NO_NEW_USERS_LIMIT or stagnant_height_count >= 5:
+            if no_new_users_count >= NO_NEW_USERS_LIMIT:
                 print(f"[-] No new users found after {no_new_users_count} consecutive scrolls - stopping collection")
             else:
                 print(f"[-] Page height unchanged after {stagnant_height_count} consecutive scrolls - likely reached end of list")
@@ -633,6 +761,34 @@ def is_actual_follower_section(driver):
     except Exception:
         return False
 
+def get_display_name_from_cell(cell):
+    """Extract display name from a user cell"""
+    try:
+        # Method 1: Try to find the first link's span (most robust)
+        link = cell.find_element(By.CSS_SELECTOR, 'a[role="link"]:not([tabindex="-1"])')
+        if link:
+            span = link.find_element(By.TAG_NAME, 'span')
+            if span and span.text.strip():
+                return span.text.strip()
+    except:
+        pass
+    
+    try:
+        # Method 2: Look for spans in the cell and find the one that looks like a display name
+        # Display names are typically in larger, bolder text
+        spans = cell.find_elements(By.TAG_NAME, 'span')
+        for span in spans:
+            text = span.text.strip()
+            # Display name is usually not empty, not starting with @, and not a button text
+            if text and not text.startswith('@') and text not in ['Following', 'Follow', 'Follows you']:
+                # Additional check: display name shouldn't be too long (usually < 50 chars)
+                if len(text) < 50:
+                    return text
+    except:
+        pass
+    
+    return ''
+
 def collect_users_from_cells(user_cells, users_data):
     """Process user cells and extract user information, filtering out suggestions"""
     actual_followers_count = 0
@@ -640,20 +796,14 @@ def collect_users_from_cells(user_cells, users_data):
     
     for cell in user_cells:
         try:
-<<<<<<< Updated upstream
             # First, check if this cell is part of a suggestion section
             if is_suggestion_section(cell):
                 suggestions_filtered += 1
                 continue
                 
-            # Check if this cell contains follow status indicators
-            has_following = len(cell.find_elements(By.XPATH, ".//*[contains(text(), 'Following') or contains(text(), 'Follows you')]")) > 0
-=======
             # Check if this cell has the "Follows you" indicator (mutual follow)
-            # This is the key element from template.js: [data-testid="userFollowIndicator"]
             follows_you_indicator = cell.find_elements(By.CSS_SELECTOR, '[data-testid="userFollowIndicator"]')
             is_mutual = len(follows_you_indicator) > 0
->>>>>>> Stashed changes
             
             # Find username link - try multiple approaches
             username_links = cell.find_elements(By.CSS_SELECTOR, 'a[href^="/"]')
@@ -666,23 +816,32 @@ def collect_users_from_cells(user_cells, users_data):
                     if username and is_valid_username(username):
                         # Check if we already have this user
                         if not any(user['username'] == username for user in users_data):
+                            # Get display name
+                            display_name = get_display_name_from_cell(cell)
+                            
                             # Try to find follow date or any timestamp info
                             follow_date = extract_follow_date(cell, len(users_data))
                             
                             # Try to extract profile picture URL from the cell (non-verbose for speed)
                             profile_pic_url = extract_profile_pic_from_cell(cell, verbose=False)
                             
+                            # Construct profile URL
+                            profile_url = f"https://x.com/{username}"
+                            
                             users_data.append({
+                                'displayName': display_name,
                                 'username': username,
+                                'url': profile_url,
                                 'follow_date': follow_date,
                                 'position': len(users_data),
-                                'is_mutual': is_mutual,  # Changed from has_status_indicator
+                                'is_mutual': is_mutual,
                                 'profile_pic_url': profile_pic_url
                             })
                             actual_followers_count += 1
                             pic_status = "[+]" if profile_pic_url else "[-]"
                             mutual_status = "MUTUAL" if is_mutual else "not mutual"
-                            print(f"[+] Added user: {username} (position {len(users_data)}) - {mutual_status} - Pic: {pic_status}")
+                            display_info = f" ({display_name})" if display_name else ""
+                            print(f"[+] Added user: {username}{display_info} (position {len(users_data)}) - {mutual_status} - Pic: {pic_status}")
                             break  # Found a valid user in this cell, move to next cell
         except Exception as e:
             print(f"[!] Error processing cell: {e}")
@@ -698,46 +857,12 @@ def try_alternative_selectors(driver, users_data):
         main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
         print("[!] Trying alternative selectors within main column...")
         
-<<<<<<< Updated upstream
         selectors = [
             '[data-testid="cellInnerDiv"] a[href^="/"]',
             'div[dir="ltr"] a[href^="/"]',
             'a[role="link"][href^="/"]',
             'a[href*="/"][role="link"]'
         ]
-=======
-        for link in user_links:
-            try:
-                href = link.get_attribute('href')
-                if href and is_valid_user_link(href):
-                    username = extract_username_from_url(href)
-                    if username and is_valid_username(username):
-                        if not any(user['username'] == username for user in users_data):
-                            # Try to find the parent cell to check for mutual indicator
-                            is_mutual = False
-                            profile_pic_url = None
-                            try:
-                                parent_cell = link.find_element(By.XPATH, "./ancestor::*[@data-testid='UserCell']")
-                                # Check for mutual follow indicator
-                                follows_you_indicator = parent_cell.find_elements(By.CSS_SELECTOR, '[data-testid="userFollowIndicator"]')
-                                is_mutual = len(follows_you_indicator) > 0
-                                profile_pic_url = extract_profile_pic_from_cell(parent_cell, verbose=False)
-                            except:
-                                pass
-                                
-                            users_data.append({
-                                'username': username,
-                                'follow_date': f"position_{len(users_data)}",
-                                'position': len(users_data),
-                                'is_mutual': is_mutual,
-                                'profile_pic_url': profile_pic_url
-                            })
-                            pic_status = "[+]" if profile_pic_url else "[-]"
-                            mutual_status = "MUTUAL" if is_mutual else "not mutual"
-                            print(f"[+] Added user (fallback): {username} - {mutual_status} - Pic: {pic_status}")
-            except Exception:
-                continue
->>>>>>> Stashed changes
         
         for selector in selectors:
             user_links = main_column.find_elements(By.CSS_SELECTOR, selector)
@@ -751,26 +876,43 @@ def try_alternative_selectors(driver, users_data):
                         if username and is_valid_username(username):
                             if not any(user['username'] == username for user in users_data):
                                 # Try to find the parent cell for profile pic extraction
+                                is_mutual = False
+                                profile_pic_url = None
+                                display_name = ''
                                 try:
                                     parent_cell = link.find_element(By.XPATH, "./ancestor::*[@data-testid='UserCell']")
                                     
                                     # Check if this is a suggestion
                                     if is_suggestion_section(parent_cell):
                                         continue
+                                    
+                                    # Check for mutual follow indicator
+                                    follows_you_indicator = parent_cell.find_elements(By.CSS_SELECTOR, '[data-testid="userFollowIndicator"]')
+                                    is_mutual = len(follows_you_indicator) > 0
+                                    
+                                    # Get display name
+                                    display_name = get_display_name_from_cell(parent_cell)
                                         
                                     profile_pic_url = extract_profile_pic_from_cell(parent_cell, verbose=False)
                                 except:
-                                    profile_pic_url = None
+                                    pass
+                                
+                                # Construct profile URL
+                                profile_url = f"https://x.com/{username}"
                                     
                                 users_data.append({
+                                    'displayName': display_name,
                                     'username': username,
+                                    'url': profile_url,
                                     'follow_date': f"position_{len(users_data)}",
                                     'position': len(users_data),
-                                    'has_status_indicator': False,
+                                    'is_mutual': is_mutual,
                                     'profile_pic_url': profile_pic_url
                                 })
                                 pic_status = "[+]" if profile_pic_url else "[-]"
-                                print(f"[+] Added user (fallback): {username} - Pic: {pic_status}")
+                                mutual_status = "MUTUAL" if is_mutual else "not mutual"
+                                display_info = f" ({display_name})" if display_name else ""
+                                print(f"[+] Added user (fallback): {username}{display_info} - {mutual_status} - Pic: {pic_status}")
                 except Exception:
                     continue
             
@@ -1025,11 +1167,7 @@ def get_profile_pic(driver, username):
                 high_quality_url = re.sub(r'_bigger', '', high_quality_url)
                 high_quality_url = re.sub(r'_mini', '', high_quality_url)
                 
-<<<<<<< Updated upstream
-                print(f'     [-] High-quality URL: {high_quality_url}')
-=======
                 print(f'     [>] High-quality URL: {high_quality_url}')
->>>>>>> Stashed changes
                 return high_quality_url
         else:
             # Fallback: try to find any profile image in the page source
@@ -1045,11 +1183,7 @@ def get_profile_pic(driver, username):
                 high_quality_url = re.sub(r'_bigger', '', high_quality_url)
                 high_quality_url = re.sub(r'_mini', '', high_quality_url)
                 
-<<<<<<< Updated upstream
-                print(f'     [-] High-quality URL (fallback): {high_quality_url}')
-=======
                 print(f'     [>] High-quality URL (fallback): {high_quality_url}')
->>>>>>> Stashed changes
                 return high_quality_url
             
     except Exception as e:
@@ -1061,11 +1195,7 @@ def download_image(url, filepath, username):
     """Download high-quality image from URL to filepath with retry logic and enhanced debugging"""
     try:
         print(f'     [!] Starting download for {username}')
-<<<<<<< Updated upstream
-        print(f'     [-] URL: {url}')
-=======
         print(f'     [!] URL: {url}')
->>>>>>> Stashed changes
         print(f'     [!] Filepath: {filepath}')
         
         headers = {
@@ -1077,15 +1207,9 @@ def download_image(url, filepath, username):
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1'
         }
-<<<<<<< Updated upstream
-
-        print(f'     [!] Downloading high-quality image from: {url}')
-
-=======
         
         print(f'     [!] Downloading high-quality image from: {url}')
         
->>>>>>> Stashed changes
         # Ensure the directory exists
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
@@ -1142,6 +1266,7 @@ def main():
     print("(Finds people you follow who also follow you back)")
     print(f"Target username: {USERNAME}")
     print(f"Download directory: {DOWNLOAD_DIR}")
+    print(f"Download choice: {download_choice}")
     print("=" * 50)
     
     driver = setup_driver()
@@ -1161,39 +1286,56 @@ def main():
             print("   - The account is private")
             print("   - You're not logged in properly")
             print("   - The username is incorrect")
-<<<<<<< Updated upstream
-            print("[x] Retrying login and following fetch...")
-=======
             print("[!] Retrying login and following fetch...")
->>>>>>> Stashed changes
             if login_to_twitter(driver):
                 following_data = get_following(driver, USERNAME)
             if not following_data:
                 print("[!?] Still no following data after retry. Exiting.")
                 return
         
-        print('\n2. Filtering for mutual follows and downloading profile pictures...')
-        
-        # Filter for mutual followers (people who follow you back)
-        # This is done ON THE FOLLOWING PAGE ITSELF using the userFollowIndicator
+        # Separate mutuals and non-mutuals
         mutual_following_data = [user for user in following_data if user.get('is_mutual', False)]
+        non_mutual_following_data = [user for user in following_data if not user.get('is_mutual', False)]
         
-        print(f'\n[+] Found {len(mutual_following_data)} mutual follows out of {len(following_data)} total following')
-        print(f'[!] These users have the "Follows you" indicator on your following page')
+        print(f'\n[+] Found {len(mutual_following_data)} mutual follows (they follow you back)')
+        print(f'[+] Found {len(non_mutual_following_data)} non-mutual follows (they don\'t follow you back)')
+        print(f'[+] Total: {len(following_data)} people you follow')
         
-        if len(mutual_following_data) == 0:
-            print("[-] No mutual follows found. This could mean:")
-            print("   - None of the people you follow also follow you back")
-            print("   - The page elements didn't load correctly")
-            print("   - Twitter's layout has changed")
+        # Determine which data to process based on user choice
+        if download_choice == '1':
+            # Only mutuals
+            users_to_process = mutual_following_data
+            list_type = "mutual following (people who follow you back)"
+            print(f'\n[!] Processing only mutual follows...')
+        elif download_choice == '2':
+            # All users
+            users_to_process = following_data
+            list_type = "all following"
+            print(f'\n[!] Processing all following (both mutual and non-mutual)...')
+        elif download_choice == '3':
+            # Both - we'll save separate JSON files
+            users_to_process = following_data
+            list_type = "all following"
+            print(f'\n[!] Processing all following (will create separate files for mutuals and non-mutuals)...')
+        else:
+            # Default to mutuals only
+            users_to_process = mutual_following_data
+            list_type = "mutual following (people who follow you back)"
+            print(f'\n[!] Invalid choice, defaulting to mutual follows only...')
+        
+        if len(users_to_process) == 0:
+            print("[-] No users to process based on your selection.")
             return
         
-        # Download profile pictures for mutual follows
-        print(f'\n[!] Downloading profile pictures for {len(mutual_following_data)} mutual followers...')
+        print(f'\n2. Downloading profile pictures for {len(users_to_process)} users...')
         
-        for idx, user_data in enumerate(mutual_following_data):
+        for idx, user_data in enumerate(users_to_process):
             username = user_data['username']
-            print(f"\n[!] Processing @{username}... ({idx + 1}/{len(mutual_following_data)})")
+            display_name = user_data.get('displayName', '')
+            display_info = f" ({display_name})" if display_name else ""
+            mutual_status = "MUTUAL" if user_data.get('is_mutual', False) else "NON-MUTUAL"
+            
+            print(f"\n[!] Processing @{username}{display_info} [{mutual_status}] ({idx + 1}/{len(users_to_process)})")
             
             pic_url = user_data.get('profile_pic_url')
             pic_downloaded = False
@@ -1228,21 +1370,24 @@ def main():
             user_data['pic_downloaded'] = pic_downloaded
             user_data['temp_filename'] = temp_filename if pic_downloaded else None
         
+        
         # Sort by position: Twitter shows newest first at position 0
         # We want oldest first (#1 = oldest follow), so we need to reverse the order
-        mutual_following_data.sort(key=lambda x: x['position'], reverse=True)
+        users_to_process.sort(key=lambda x: x['position'], reverse=True)
         
-        list_type = "mutual following (people who follow you back)"
-        print(f'\n[+] Found {len(mutual_following_data)} {list_type} (ordered by when you followed them, oldest to newest):')
+        print(f'\n[+] Found {len(users_to_process)} {list_type} (ordered by when you followed them, oldest to newest):')
         print("-" * 60)
         
         # Create a list to store results with timestamps
         results = []
         
         # Now rename the temp files to proper numbered filenames and create results
-        for idx, user_data in enumerate(mutual_following_data, 1):
+        for idx, user_data in enumerate(users_to_process, 1):
             username = user_data['username']
-            print(f'{idx:3d}. @{username} (you followed them #{user_data["position"] + 1})')
+            display_name = user_data.get('displayName', '')
+            display_info = f" ({display_name})" if display_name else ""
+            mutual_tag = " [MUTUAL]" if user_data.get('is_mutual', False) else ""
+            print(f'{idx:3d}. @{username}{display_info}{mutual_tag} (position #{user_data["position"] + 1})')
             
             pic_downloaded = user_data.get('pic_downloaded', False)
             temp_filename = user_data.get('temp_filename')
@@ -1266,10 +1411,12 @@ def main():
             # Store result
             results.append({
                 'number': idx,
+                'displayName': display_name,
                 'username': username,
-                'handle': f'@{username}',
+                'url': user_data.get('url', f'https://x.com/{username}'),
                 'follow_date': user_data['follow_date'],
                 'original_position': user_data['position'],
+                'is_mutual': user_data.get('is_mutual', False),
                 'profile_pic_url': user_data.get('profile_pic_url'),
                 'pic_downloaded': pic_downloaded,
                 'filename': new_filename
@@ -1277,42 +1424,85 @@ def main():
         
         print(f'\n=== COLLECTION SUMMARY ===')
         print(f'[+] Total people you follow found: {len(following_data)}')
-        print(f'[!] Expected vs Actual: You mentioned following 1368 people')
-        if len(following_data) < 1300:
-            print(f'[!] Note: Found {len(following_data)} which may indicate some suggestions were filtered out')
-            print(f'[!] This is good - it means the improved filtering is working!')
-        elif len(following_data) > 1400:
-            print(f'[!] Warning: Found more than expected - some suggestions may have been included')
+        print(f'[+] Mutual follows: {len(mutual_following_data)}')
+        print(f'[+] Non-mutual follows: {len(non_mutual_following_data)}')
         
         print(f'\n=== SUMMARY ===')
-        list_type = "mutual following (people who follow you back)"
-        print(f'[+] Total {list_type}: {len(mutual_following_data)}')
+        print(f'[+] Total processed: {len(users_to_process)}')
         successful_downloads = sum(1 for r in results if r['pic_downloaded'])
-        print(f'[+] Profile pictures downloaded: {successful_downloads}/{len(mutual_following_data)}')
+        print(f'[+] Profile pictures downloaded: {successful_downloads}/{len(users_to_process)}')
         print(f'[!] Images saved to: {DOWNLOAD_DIR}/')
         print(f'[!] Filename format: 001_@username.jpg, 002_@username.jpg, etc.')
-        print(f'[!] Ordered from: oldest person you followed (#1) to newest person you followed (#{len(mutual_following_data)})')
-        print(f'[!] Note: These are people YOU follow who also follow YOU back (mutual following)')
-        print(f'[!] Profile pictures were downloaded ONLY for mutual followers')
+        print(f'[!] Ordered from: oldest person you followed (#1) to newest person you followed (#{len(users_to_process)})')
         
-        # Save results to JSON file with timestamp
-        json_data = {
-            'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'target_username': USERNAME,
-            'list_type': list_type,
-            'total_results': len(mutual_following_data),
-            'total_following': len(following_data),
-            'total_followers': 0,  # No followers data collected
-            'successful_downloads': successful_downloads,
-            'results': results
-        }
-        
-        try:
-            with open(JSON_OUTPUT_FILE, 'w', encoding='utf-8') as f:
-                json.dump(json_data, f, indent=2, ensure_ascii=False)
-            print(f'[!] Results saved to: {JSON_OUTPUT_FILE}')
-        except Exception as e:
-            print(f'[!?] Failed to save JSON file: {e}')
+        # Save results to JSON file(s) based on user choice
+        if download_choice == '3':
+            # Save separate files for mutuals and non-mutuals
+            mutual_results = [r for r in results if r['is_mutual']]
+            non_mutual_results = [r for r in results if not r['is_mutual']]
+            
+            # Mutuals JSON
+            mutuals_json = {
+                'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'target_username': USERNAME,
+                'list_type': 'mutual following',
+                'totalMutuals': len(mutual_results),
+                'mutuals': mutual_results
+            }
+            
+            # Non-mutuals JSON
+            non_mutuals_json = {
+                'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'target_username': USERNAME,
+                'list_type': 'non-mutual following',
+                'totalNonMutuals': len(non_mutual_results),
+                'nonMutuals': non_mutual_results
+            }
+            
+            # Combined JSON
+            combined_json = {
+                'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'target_username': USERNAME,
+                'totalMutuals': len(mutual_results),
+                'totalNonMutuals': len(non_mutual_results),
+                'mutuals': mutual_results,
+                'nonMutuals': non_mutual_results
+            }
+            
+            try:
+                with open('mutuals_only.json', 'w', encoding='utf-8') as f:
+                    json.dump(mutuals_json, f, indent=2, ensure_ascii=False)
+                print(f'[!] Mutuals saved to: mutuals_only.json')
+                
+                with open('non_mutuals_only.json', 'w', encoding='utf-8') as f:
+                    json.dump(non_mutuals_json, f, indent=2, ensure_ascii=False)
+                print(f'[!] Non-mutuals saved to: non_mutuals_only.json')
+                
+                with open('x_twitter_mutual_data.json', 'w', encoding='utf-8') as f:
+                    json.dump(combined_json, f, indent=2, ensure_ascii=False)
+                print(f'[!] Combined data saved to: x_twitter_mutual_data.json')
+            except Exception as e:
+                print(f'[!?] Failed to save JSON files: {e}')
+        else:
+            # Single JSON file
+            json_data = {
+                'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'target_username': USERNAME,
+                'list_type': list_type,
+                'total_results': len(users_to_process),
+                'total_following': len(following_data),
+                'totalMutuals': len(mutual_following_data),
+                'totalNonMutuals': len(non_mutual_following_data),
+                'successful_downloads': successful_downloads,
+                'results': results
+            }
+            
+            try:
+                with open(JSON_OUTPUT_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(json_data, f, indent=2, ensure_ascii=False)
+                print(f'[!] Results saved to: {JSON_OUTPUT_FILE}')
+            except Exception as e:
+                print(f'[!?] Failed to save JSON file: {e}')
         
     except KeyboardInterrupt:
         print("\n[!?] Process interrupted by user.")
