@@ -12,7 +12,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 from webdriver_manager.firefox import GeckoDriverManager
 import time
 import re
@@ -797,54 +797,88 @@ def collect_users_from_cells(user_cells, users_data):
     for cell in user_cells:
         try:
             # First, check if this cell is part of a suggestion section
-            if is_suggestion_section(cell):
-                suggestions_filtered += 1
+            try:
+                if is_suggestion_section(cell):
+                    suggestions_filtered += 1
+                    continue
+            except StaleElementReferenceException:
+                # Element became stale, skip it
                 continue
                 
             # Check if this cell has the "Follows you" indicator (mutual follow)
-            follows_you_indicator = cell.find_elements(By.CSS_SELECTOR, '[data-testid="userFollowIndicator"]')
-            is_mutual = len(follows_you_indicator) > 0
+            try:
+                follows_you_indicator = cell.find_elements(By.CSS_SELECTOR, '[data-testid="userFollowIndicator"]')
+                is_mutual = len(follows_you_indicator) > 0
+            except StaleElementReferenceException:
+                # Element became stale, skip it
+                continue
             
             # Find username link - try multiple approaches
-            username_links = cell.find_elements(By.CSS_SELECTOR, 'a[href^="/"]')
-            for username_link in username_links:
-                href = username_link.get_attribute('href')
+            try:
+                username_links = cell.find_elements(By.CSS_SELECTOR, 'a[href^="/"]')
+            except StaleElementReferenceException:
+                # Element became stale, skip it
+                continue
                 
-                if href and is_valid_user_link(href):
-                    username = extract_username_from_url(href)
+            for username_link in username_links:
+                try:
+                    href = username_link.get_attribute('href')
                     
-                    if username and is_valid_username(username):
-                        # Check if we already have this user
-                        if not any(user['username'] == username for user in users_data):
-                            # Get display name
-                            display_name = get_display_name_from_cell(cell)
-                            
-                            # Try to find follow date or any timestamp info
-                            follow_date = extract_follow_date(cell, len(users_data))
-                            
-                            # Try to extract profile picture URL from the cell (non-verbose for speed)
-                            profile_pic_url = extract_profile_pic_from_cell(cell, verbose=False)
-                            
-                            # Construct profile URL
-                            profile_url = f"https://x.com/{username}"
-                            
-                            users_data.append({
-                                'displayName': display_name,
-                                'username': username,
-                                'url': profile_url,
-                                'follow_date': follow_date,
-                                'position': len(users_data),
-                                'is_mutual': is_mutual,
-                                'profile_pic_url': profile_pic_url
-                            })
-                            actual_followers_count += 1
-                            pic_status = "[+]" if profile_pic_url else "[-]"
-                            mutual_status = "MUTUAL" if is_mutual else "not mutual"
-                            display_info = f" ({display_name})" if display_name else ""
-                            print(f"[+] Added user: {username}{display_info} (position {len(users_data)}) - {mutual_status} - Pic: {pic_status}")
-                            break  # Found a valid user in this cell, move to next cell
+                    if href and is_valid_user_link(href):
+                        username = extract_username_from_url(href)
+                        
+                        if username and is_valid_username(username):
+                            # Check if we already have this user
+                            if not any(user['username'] == username for user in users_data):
+                                # Get display name
+                                try:
+                                    display_name = get_display_name_from_cell(cell)
+                                except StaleElementReferenceException:
+                                    display_name = ''
+                                
+                                # Try to find follow date or any timestamp info
+                                try:
+                                    follow_date = extract_follow_date(cell, len(users_data))
+                                except StaleElementReferenceException:
+                                    follow_date = f"position_{len(users_data)}"
+                                
+                                # Try to extract profile picture URL from the cell (non-verbose for speed)
+                                try:
+                                    profile_pic_url = extract_profile_pic_from_cell(cell, verbose=False)
+                                except StaleElementReferenceException:
+                                    profile_pic_url = None
+                                
+                                # Construct profile URL
+                                profile_url = f"https://x.com/{username}"
+                                
+                                users_data.append({
+                                    'displayName': display_name,
+                                    'username': username,
+                                    'url': profile_url,
+                                    'follow_date': follow_date,
+                                    'position': len(users_data),
+                                    'is_mutual': is_mutual,
+                                    'profile_pic_url': profile_pic_url
+                                })
+                                actual_followers_count += 1
+                                pic_status = "[+]" if profile_pic_url else "[-]"
+                                mutual_status = "MUTUAL" if is_mutual else "not mutual"
+                                display_info = f" ({display_name})" if display_name else ""
+                                print(f"[+] Added user: {username}{display_info} (position {len(users_data)}) - {mutual_status} - Pic: {pic_status}")
+                                break  # Found a valid user in this cell, move to next cell
+                except StaleElementReferenceException:
+                    # Link became stale, try next link
+                    continue
+                except Exception as e:
+                    # Other errors, continue to next link
+                    continue
+        except StaleElementReferenceException:
+            # Entire cell became stale, skip it
+            continue
         except Exception as e:
-            print(f"[!] Error processing cell: {e}")
+            # Only print non-stale errors
+            if 'stale' not in str(e).lower():
+                print(f"[!] Error processing cell: {e}")
             continue
     
     if suggestions_filtered > 0:
