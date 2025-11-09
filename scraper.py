@@ -29,7 +29,8 @@ DOWNLOAD_DIR = 'profile_pics'
 SCROLL_PAUSE_TIME = 3      # Time to wait between scrolls (increased for rate limiting)
 PROFILE_CHECK_DELAY = 10    # Delay between profile visits to avoid 429 errors
 JSON_OUTPUT_FILE = 'mutual_following.json'  # JSON output file
-NO_NEW_USERS_LIMIT = 5     # Stop scrolling after this many attempts with no new users
+NO_NEW_USERS_LIMIT = 8     # Stop scrolling after this many attempts with no new users (increased for large lists)
+MAX_CONSECUTIVE_ERRORS = 10  # Stop if we hit too many consecutive errors
 
 # --- SETUP ---
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -353,26 +354,17 @@ def login_to_twitter(driver):
                 return True
         except TimeoutException:
             continue
-    
-    # Not logged in, proceed with manual login
-    print("\n[!] LOGIN REQUIRED")
+        print("\n[!] LOGIN REQUIRED")
     print("=" * 50)
     print("X/Twitter requires you to be logged in to view following lists.")
     print("The browser will now open to X/Twitter login page.")
     print("Please log in manually and then the script will automatically continue.")
     print("=" * 50)
-    
-    # Navigate to login page
     driver.get('https://x.com/login')
-    
-    # Wait for user to log in automatically by checking for login success
     print("\n[!] Please log in to X/Twitter in the browser window...")
     print("[!] Script will automatically continue once login is detected...")
-    
-    # Wait for login to complete by checking for logged-in elements
     max_wait_time = 300  
     check_interval = 10 
-    
     for attempt in range(0, max_wait_time, check_interval):
         try:
             current_url = driver.current_url.lower()
@@ -428,16 +420,14 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
     no_new_users_count = 0
     stagnant_height_count = 0
     scroll_count = 0
+    consecutive_errors = 0
     
     print(f"[!] Starting comprehensive single-pass scroll through {page_type} list...")
-    
-    # Ensure we're in the correct section before starting
     if not is_actual_follower_section(driver):
         print(f"[!] Warning: May not be in actual {page_type} section")
     
     print("[!] Collecting initially visible users before scrolling...")
     try:
-        # Only collect from the main column, avoid sidebar suggestions
         main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
         user_cells = main_column.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
         print(f"[!] Found {len(user_cells)} UserCell elements in main column on initial view")
@@ -469,24 +459,35 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
         old_count = len(users_data)
         try:
             # Strategy 1: Look for UserCell elements in main column (most reliable)
-            try:
-                main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
-                user_cells = main_column.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
-                print(f"[!] Found {len(user_cells)} UserCell elements in main column on current view")
-            except:
-                # Fallback to all UserCells if main column not found
-                user_cells = driver.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
-                print(f"[!] Fallback: Found {len(user_cells)} UserCell elements on current view")
-            
+            def get_user_cells(driver):
+                try:
+                    main_column = driver.find_element(By.CSS_SELECTOR, '[data-testid="primaryColumn"]')
+                    user_cells = main_column.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+                    print(f"[!] Found {len(user_cells)} UserCell elements in main column on current view")
+                except Exception:
+                    # Fallback to all UserCells if main column not found
+                    user_cells = driver.find_elements(By.CSS_SELECTOR, '[data-testid="UserCell"]')
+                    print(f"[!] Fallback: Found {len(user_cells)} UserCell elements on current view (may include non-follower cells)")
+                return user_cells
+
+            user_cells = get_user_cells(driver)
             collect_users_from_cells(user_cells, users_data)
                     
             # Strategy 2: Fallback detection methods
             if len(users_data) == old_count:
                 print("[!] UserCell method found no new users, trying fallback methods...")
                 try_alternative_selectors(driver, users_data)
+            
+            consecutive_errors = 0  # Reset error counter on success
                         
         except (TimeoutException, NoSuchElementException) as e:
-            print(f"[!?] Error collecting users: {e}")
+            consecutive_errors += 1
+            print(f"[!?] Error collecting users ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}")
+            
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                print(f"[-] Too many consecutive errors ({consecutive_errors}). Twitter may be blocking or throttling.")
+                print(f"[!] Collected {len(users_data)} users before stopping.")
+                break
         
         # Check if we found new users
         new_count = len(users_data)
@@ -548,19 +549,18 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
         new_height = driver.execute_script("return document.body.scrollHeight")
         if new_height == last_height:
             stagnant_height_count += 1
-            print(f"[!] Page height unchanged (attempt {stagnant_height_count}/3)")
+            print(f"[!] Page height unchanged (attempt {stagnant_height_count}/8)")
         else:
             stagnant_height_count = 0
             last_height = new_height
             
-        if no_new_users_count >= NO_NEW_USERS_LIMIT or stagnant_height_count >= 5:
+        if no_new_users_count >= NO_NEW_USERS_LIMIT or stagnant_height_count >= 8:
             if no_new_users_count >= NO_NEW_USERS_LIMIT:
                 print(f"[-] No new users found after {no_new_users_count} consecutive scrolls - stopping collection")
             else:
                 print(f"[-] Page height unchanged after {stagnant_height_count} consecutive scrolls - likely reached end of list")
             
-            # Final verification: try one more time with different approach
-            print("[!] Performing final verification scroll...")
+            print(f"[!] Performing final verification scroll...")
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight + 5000);")
             time.sleep(SCROLL_PAUSE_TIME * 2)
             
@@ -580,6 +580,7 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
                 continue
                 
             print(f"[+] Completed scroll with {scroll_count} total scrolls")
+            print(f"[!] Final collection stats: {len(users_data)} users collected")
             break
         else:
             stagnant_height_count = 0
@@ -636,14 +637,8 @@ def scroll_and_collect_users_with_dates(driver, page_type="followers"):
                     
         except Exception:
             pass
-            
-        # Safety valve: if we've scrolled excessively (100+ times), something might be wrong
-        if scroll_count > 100:
-            print(f"[-] Safety stop at {scroll_count} scrolls - this seems excessive")
-            print(f"[+] Completed scroll with {scroll_count} total scrolls")
-            break
     
-    print(f"[+] Completed single-pass scroll with {scroll_count} total scrolls")
+    print(f"[!] Exiting scroll loop with {len(users_data)} users collected")
     return users_data
 
 def is_valid_user_link(href):
@@ -1306,12 +1301,11 @@ def main():
     driver = setup_driver()
     
     try:
-        # Step 1: Login to Twitter
         if not login_to_twitter(driver):
             print("[-] Login failed. Cannot proceed without authentication.")
             return
         
-        print('\n1. Fetching following (people you follow)...')
+        print('\nFetching following (people you follow)...')
         following_data = get_following(driver, USERNAME)
         print(f'Found {len(following_data)} people you follow.')
         
@@ -1327,7 +1321,6 @@ def main():
                 print("[!?] Still no following data after retry. Exiting.")
                 return
         
-        # Separate mutuals and non-mutuals
         mutual_following_data = [user for user in following_data if user.get('is_mutual', False)]
         non_mutual_following_data = [user for user in following_data if not user.get('is_mutual', False)]
         
@@ -1335,24 +1328,19 @@ def main():
         print(f'[+] Found {len(non_mutual_following_data)} non-mutual follows (they don\'t follow you back)')
         print(f'[+] Total: {len(following_data)} people you follow')
         
-        # Determine which data to process based on user choice
         if download_choice == '1':
-            # Only mutuals
             users_to_process = mutual_following_data
             list_type = "mutual following (people who follow you back)"
             print(f'\n[!] Processing only mutual follows...')
         elif download_choice == '2':
-            # All users
             users_to_process = following_data
             list_type = "all following"
             print(f'\n[!] Processing all following (both mutual and non-mutual)...')
         elif download_choice == '3':
-            # Both - we'll save separate JSON files
             users_to_process = following_data
             list_type = "all following"
             print(f'\n[!] Processing all following (will create separate files for mutuals and non-mutuals)...')
         else:
-            # Default to mutuals only
             users_to_process = mutual_following_data
             list_type = "mutual following (people who follow you back)"
             print(f'\n[!] Invalid choice, defaulting to mutual follows only...')
@@ -1361,7 +1349,17 @@ def main():
             print("[-] No users to process based on your selection.")
             return
         
-        print(f'\n2. Downloading profile pictures for {len(users_to_process)} users...')
+        # Create separate directories for choice 3
+        if download_choice == '3':
+            mutuals_dir = os.path.join(DOWNLOAD_DIR, 'mutuals')
+            non_mutuals_dir = os.path.join(DOWNLOAD_DIR, 'non_mutuals')
+            os.makedirs(mutuals_dir, exist_ok=True)
+            os.makedirs(non_mutuals_dir, exist_ok=True)
+            print(f'\nCreated separate directories:')
+            print(f'  - Mutuals: {mutuals_dir}')
+            print(f'  - Non-mutuals: {non_mutuals_dir}')
+        
+        print(f'\nDownloading profile pictures for {len(users_to_process)} users...')
         
         for idx, user_data in enumerate(users_to_process):
             username = user_data['username']
@@ -1375,22 +1373,23 @@ def main():
             pic_downloaded = False
             temp_filename = None
             
-            # If we don't have a profile pic URL from the cell, fetch it from their profile
             if not pic_url or not is_valid_twitter_profile_url(pic_url, verbose=False):
                 print(f'     [!] Fetching profile pic from profile page...')
                 pic_url = get_profile_pic(driver, username)
-                # Update the user_data with the fetched URL
                 user_data['profile_pic_url'] = pic_url
-                # Add delay after visiting profile page
                 time.sleep(PROFILE_CHECK_DELAY)
             else:
                 print(f'     [+] Using profile pic URL from following page')
             
-            # Download the profile picture
             if pic_url:
-                # Create filename with temporary numbering (we'll rename later)
+                # Determine target directory based on download choice
+                if download_choice == '3':
+                    target_dir = mutuals_dir if user_data.get('is_mutual', False) else non_mutuals_dir
+                else:
+                    target_dir = DOWNLOAD_DIR
+                
                 temp_filename = f'temp_{idx:03d}_@{username}.jpg'
-                temp_filepath = os.path.join(DOWNLOAD_DIR, temp_filename)
+                temp_filepath = os.path.join(target_dir, temp_filename)
                 
                 pic_downloaded = download_image(pic_url, temp_filepath, username)
                 if pic_downloaded:
@@ -1400,22 +1399,22 @@ def main():
             else:
                 print(f'     [-] Could not find profile picture URL')
             
-            # Update user_data with download status
             user_data['pic_downloaded'] = pic_downloaded
             user_data['temp_filename'] = temp_filename if pic_downloaded else None
         
-        
-        # Sort by position: Twitter shows newest first at position 0
-        # We want oldest first (#1 = oldest follow), so we need to reverse the order
+        # Sort by position: Twitter shows newest first at position 0, reverse to get oldest first
         users_to_process.sort(key=lambda x: x['position'], reverse=True)
         
         print(f'\n[+] Found {len(users_to_process)} {list_type} (ordered by when you followed them, oldest to newest):')
         print("-" * 60)
         
-        # Create a list to store results with timestamps
         results = []
         
-        # Now rename the temp files to proper numbered filenames and create results
+        # For choice 3, we need separate counters for mutuals and non-mutuals
+        if download_choice == '3':
+            mutual_counter = 0
+            non_mutual_counter = 0
+        
         for idx, user_data in enumerate(users_to_process, 1):
             username = user_data['username']
             display_name = user_data.get('displayName', '')
@@ -1427,22 +1426,35 @@ def main():
             temp_filename = user_data.get('temp_filename')
             
             if pic_downloaded and temp_filename:
-                # Rename temp file to proper numbered filename
-                old_filepath = os.path.join(DOWNLOAD_DIR, temp_filename)
-                new_filename = f'{idx:03d}_@{username}.jpg'
-                new_filepath = os.path.join(DOWNLOAD_DIR, new_filename)
+                # Determine source and target based on download choice
+                if download_choice == '3':
+                    is_mutual = user_data.get('is_mutual', False)
+                    if is_mutual:
+                        mutual_counter += 1
+                        source_dir = mutuals_dir
+                        new_filename = f'{mutual_counter:03d}_@{username}.jpg'
+                    else:
+                        non_mutual_counter += 1
+                        source_dir = non_mutuals_dir
+                        new_filename = f'{non_mutual_counter:03d}_@{username}.jpg'
+                    
+                    old_filepath = os.path.join(source_dir, temp_filename)
+                    new_filepath = os.path.join(source_dir, new_filename)
+                else:
+                    old_filepath = os.path.join(DOWNLOAD_DIR, temp_filename)
+                    new_filename = f'{idx:03d}_@{username}.jpg'
+                    new_filepath = os.path.join(DOWNLOAD_DIR, new_filename)
                 
                 try:
                     os.rename(old_filepath, new_filepath)
                     print(f'     [+] Profile picture saved as {new_filename}')
                 except Exception as e:
                     print(f'     [!] Error renaming file: {e}')
-                    new_filename = temp_filename  # Keep temp name if rename fails
+                    new_filename = temp_filename
             else:
                 new_filename = None
                 print(f'     [-] No profile picture available')
             
-            # Store result
             results.append({
                 'number': idx,
                 'displayName': display_name,
@@ -1465,17 +1477,22 @@ def main():
         print(f'[+] Total processed: {len(users_to_process)}')
         successful_downloads = sum(1 for r in results if r['pic_downloaded'])
         print(f'[+] Profile pictures downloaded: {successful_downloads}/{len(users_to_process)}')
-        print(f'[!] Images saved to: {DOWNLOAD_DIR}/')
+        
+        if download_choice == '3':
+            mutual_downloads = sum(1 for r in results if r['pic_downloaded'] and r['is_mutual'])
+            non_mutual_downloads = sum(1 for r in results if r['pic_downloaded'] and not r['is_mutual'])
+            print(f'[!] Mutuals downloaded: {mutual_downloads} (saved to: {mutuals_dir}/)')
+            print(f'[!] Non-mutuals downloaded: {non_mutual_downloads} (saved to: {non_mutuals_dir}/)')
+        else:
+            print(f'[!] Images saved to: {DOWNLOAD_DIR}/')
+        
         print(f'[!] Filename format: 001_@username.jpg, 002_@username.jpg, etc.')
         print(f'[!] Ordered from: oldest person you followed (#1) to newest person you followed (#{len(users_to_process)})')
         
-        # Save results to JSON file(s) based on user choice
         if download_choice == '3':
-            # Save separate files for mutuals and non-mutuals
             mutual_results = [r for r in results if r['is_mutual']]
             non_mutual_results = [r for r in results if not r['is_mutual']]
             
-            # Mutuals JSON
             mutuals_json = {
                 'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'target_username': USERNAME,
@@ -1484,7 +1501,6 @@ def main():
                 'mutuals': mutual_results
             }
             
-            # Non-mutuals JSON
             non_mutuals_json = {
                 'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'target_username': USERNAME,
@@ -1493,7 +1509,6 @@ def main():
                 'nonMutuals': non_mutual_results
             }
             
-            # Combined JSON
             combined_json = {
                 'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'target_username': USERNAME,
@@ -1518,7 +1533,6 @@ def main():
             except Exception as e:
                 print(f'[!?] Failed to save JSON files: {e}')
         else:
-            # Single JSON file
             json_data = {
                 'scraped_at': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'target_username': USERNAME,
@@ -1547,7 +1561,6 @@ def main():
     finally:
         print("\n[!] Closing browser...")
         
-        # Cleanup temporary profile if it exists
         temp_profile = getattr(driver, 'temp_profile_path', None)
         
         driver.quit()
